@@ -1,0 +1,9 @@
+.build/
+dist/
+.swiftpm/
+.DS_Store
+*.xcuserstate
+# Personal signing material must never be committed.
+*.mobileprovision
+*.p12
+*.p8

@@ -20,6 +20,10 @@ jobs:
             || { echo "Tag $GITHUB_REF_NAME doesn't match PhoneAgentAPI.productVersion"; exit 1; }
           grep -q "releases/download/$GITHUB_REF_NAME" README.md \
             || { echo "README download commands don't point at $GITHUB_REF_NAME"; exit 1; }
+          for manifest in plugins/terminal-phone/.claude-plugin/plugin.json .claude-plugin/marketplace.json; do
+            grep -q "\"version\": \"${GITHUB_REF_NAME#v}\"" "$manifest" \
+              || { echo "$manifest doesn't have version ${GITHUB_REF_NAME#v}"; exit 1; }
+          done
       - name: Test
         run: swift test
       - name: Build and package

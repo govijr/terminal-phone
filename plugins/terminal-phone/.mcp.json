@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "terminal-phone": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/terminal-phone-mcp",
+      "args": []
+    }
+  }
+}

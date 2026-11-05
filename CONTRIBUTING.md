@@ -45,7 +45,7 @@ Run live checks against a dedicated phone name (for example `validation`), never
 
 ## Releasing (maintainers)
 
-1. Bump `PhoneAgentAPI.productVersion` and the version in the README's download commands.
+1. Bump `PhoneAgentAPI.productVersion`, the version in the README's download commands, and `version` in `plugins/terminal-phone/.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json`.
 2. Tag `vX.Y.Z`. The release workflow tests, builds and attaches the archive and its `.sha256`.
 
 By contributing, you agree your contributions are licensed under the MIT License.

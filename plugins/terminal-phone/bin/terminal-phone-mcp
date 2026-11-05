@@ -1,0 +1,10 @@
+#!/bin/sh
+# Starts the terminal-phone MCP server. The plugin doesn't ship the CLI itself: it uses the one you
+# installed, so the plugin and the CLI upgrade separately. Agent apps launched from the Dock often
+# don't have ~/.local/bin on PATH, so the default install locations are checked too.
+for candidate in "${TERMINAL_PHONE_BIN:-}" "$(command -v terminal-phone 2>/dev/null)" \
+                 "$HOME/.local/bin/terminal-phone" /opt/homebrew/bin/terminal-phone /usr/local/bin/terminal-phone; do
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then exec "$candidate" mcp "$@"; fi
+done
+echo "terminal-phone isn't installed. Install it from https://github.com/govijr/terminal-phone#install, then restart Claude Code. Set TERMINAL_PHONE_BIN if it lives somewhere else." >&2
+exit 1

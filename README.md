@@ -23,10 +23,10 @@ Requirements: an Apple silicon Mac with macOS 15 or later, and Xcode 26 or later
 **Prebuilt download:** from [Releases](https://github.com/govijr/terminal-phone/releases), with `curl` so macOS doesn't quarantine it:
 
 ```sh
-base=https://github.com/govijr/terminal-phone/releases/download/v0.3.0
-curl -fsSLO "$base/terminal-phone-0.3.0-macos-arm64.tar.gz" -O "$base/terminal-phone-0.3.0-macos-arm64.tar.gz.sha256"
-shasum -a 256 -c terminal-phone-0.3.0-macos-arm64.tar.gz.sha256
-tar -xzf terminal-phone-0.3.0-macos-arm64.tar.gz
+base=https://github.com/govijr/terminal-phone/releases/download/v0.3.1
+curl -fsSLO "$base/terminal-phone-0.3.1-macos-arm64.tar.gz" -O "$base/terminal-phone-0.3.1-macos-arm64.tar.gz.sha256"
+shasum -a 256 -c terminal-phone-0.3.1-macos-arm64.tar.gz.sha256
+tar -xzf terminal-phone-0.3.1-macos-arm64.tar.gz
 ./terminal-phone/terminal-phone self install
 ```
 
@@ -98,11 +98,23 @@ A flow is a short YAML list of steps:
 
 ### With your AI agent (MCP)
 
-```sh
-claude mcp add terminal-phone -- terminal-phone mcp
+**Claude Code plugin** (the MCP tools plus a skill that teaches Claude to observe, act and verify). Run these inside Claude Code:
+
+```
+/plugin marketplace add govijr/terminal-phone
+/plugin install terminal-phone@terminal-phone
 ```
 
-Any MCP client works: run `terminal-phone mcp` as a stdio server. Agents get `phone_devices`, `phone_boot`, `phone_session`, `phone_capabilities`, `phone_observe`, `phone_act` and `phone_wait`. Without MCP, the same operations are JSON CLI commands:
+**Any agent app:** register the MCP server with Claude Code, Cursor or Codex. With no flags, it uses the apps it finds:
+
+```sh
+terminal-phone mcp install            # or --claude / --cursor / --codex; --print shows the entries
+terminal-phone mcp uninstall
+```
+
+It changes only the `terminal-phone` entry and backs up any file it edits. Restart the app afterwards. Other MCP clients can run `terminal-phone mcp` as a stdio server. The download also includes `agent/AGENT.md` and `agent/skills/terminal-phone/SKILL.md` for agents that read guides or skills. In Claude Code, use either the plugin or `mcp install --claude`, not both.
+
+Agents get `phone_devices`, `phone_boot`, `phone_session`, `phone_capabilities`, `phone_observe`, `phone_act` and `phone_wait`. Without MCP, the same operations are JSON CLI commands:
 
 ```sh
 terminal-phone up work --no-view

@@ -411,6 +411,9 @@ final class PhoneCLI {
       terminal-phone capabilities [NAME]
       terminal-phone session start|status|release|stop [NAME]
       terminal-phone schema | mcp
+      terminal-phone mcp install [--claude] [--cursor] [--codex] [--print]   register the MCP server (default: apps found)
+      terminal-phone mcp uninstall [--claude] [--cursor] [--codex]
+      Claude Code plugin (MCP + skill): /plugin marketplace add govijr/terminal-phone
 
     Real iPhones (via WebDriverAgent; view-only unless --allow-input):
       terminal-phone device list

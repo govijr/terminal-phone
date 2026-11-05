@@ -82,7 +82,7 @@ Run `terminal-phone connect` for device selection, input approval and remembered
 
 ## MCP
 
-Launch `terminal-phone mcp` as a stdio MCP server using the executable's absolute path. Set `TERMINAL_PHONE_HOME` in its environment if using a custom registry. No global agent settings are changed automatically.
+Launch `terminal-phone mcp` as a stdio MCP server using the executable's absolute path. Set `TERMINAL_PHONE_HOME` in its environment if using a custom registry. No agent settings are changed unless you ask: `terminal-phone mcp install [--claude] [--cursor] [--codex]` registers the server (user scope for Claude Code, `~/.cursor/mcp.json`, `~/.codex/config.toml`) with the installed launcher's path, `--print` shows the entries without writing, and `mcp uninstall` removes them. In Claude Code, `/plugin marketplace add govijr/terminal-phone` then `/plugin install terminal-phone@terminal-phone` adds the server and a skill.
 
 ```json
 {

@@ -1,0 +1,15 @@
+{
+  "name": "terminal-phone",
+  "owner": { "name": "govijr" },
+  "metadata": { "description": "terminal-phone: an iOS simulator or paired iPhone your coding agent can see and drive." },
+  "plugins": [
+    {
+      "name": "terminal-phone",
+      "source": "./plugins/terminal-phone",
+      "description": "Drive an iOS simulator or paired iPhone from Claude Code: MCP phone tools plus a skill for observe, act and verify.",
+      "version": "0.3.1",
+      "category": "development",
+      "keywords": ["ios", "iphone", "simulator", "testing", "mcp"]
+    }
+  ]
+}

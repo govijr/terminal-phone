@@ -10,7 +10,8 @@ extension PhoneCLI {
             try printJSON(["schemaVersion": PhoneAgentAPI.version, "tools": PhoneAgentTools.definitions]); return
         }
         if command == "mcp" {
-            guard input.isEmpty else { throw AgentError(.invalidRequest, "Usage: terminal-phone mcp") }
+            if let first = input.first, ["install", "uninstall"].contains(first) { try await mcpConfigCommand(input); return }
+            guard input.isEmpty else { throw AgentError(.invalidRequest, "Usage: terminal-phone mcp  (stdio server)\n\(Self.mcpConfigUsage)") }
             await PhoneMCPServer(cli: self).run(); return
         }
         if command == "session" {

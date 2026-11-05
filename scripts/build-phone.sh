@@ -13,6 +13,8 @@ cp resources/phone-agent-worker.py dist/resources/phone-agent-worker.py
 cp resources/phone-idb-requirements.txt dist/resources/phone-idb-requirements.txt
 mkdir -p dist/agent
 cp docs/TERMINAL-PHONE-AGENT.md dist/agent/AGENT.md
+mkdir -p dist/agent/skills/terminal-phone
+cp plugins/terminal-phone/skills/terminal-phone/SKILL.md dist/agent/skills/terminal-phone/SKILL.md
 cp "$binary_dir/terminal-phone" dist/terminal-phone
 codesign --force --sign - dist/terminal-phone
 codesign --verify --strict dist/terminal-phone

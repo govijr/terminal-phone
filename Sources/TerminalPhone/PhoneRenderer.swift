@@ -120,6 +120,18 @@ final class PhoneRenderer: @unchecked Sendable {
         }
     }
 
+    /// A screenshot inside the device frame, with transparent corners. `pixelsPerPoint` is
+    /// usually the screen's own scale, so the screen keeps its native sharpness.
+    func framed(_ image: CGImage, finish: FrameFinish, width points: Int, height pointsHigh: Int, pixelsPerPoint: Double) -> CGImage? {
+        let frame = DeviceFrame(screenWidth: points, screenHeight: pointsHigh, finish: finish)
+        let viewport = PhoneViewport(frame: frame, column: 1, row: 1, columns: 1, rows: 1,
+                                     cellWidth: (frame.width * pixelsPerPoint).rounded(.up), cellHeight: (frame.height * pixelsPerPoint).rounded(.up))
+        let placement = FramePlacement(viewport: viewport, background: nil)
+        guard let context = context(placement, data: nil) else { return nil }
+        compose(image, placement: placement, into: context)
+        return context.makeImage()
+    }
+
     private func context(_ placement: FramePlacement, data: UnsafeMutableRawPointer?) -> CGContext? {
         let v = placement.viewport
         let context = CGContext(data: data, width: v.canvasWidth, height: v.canvasHeight, bitsPerComponent: 8,

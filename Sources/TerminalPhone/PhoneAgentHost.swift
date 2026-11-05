@@ -146,6 +146,8 @@ enum PhoneAgentHost {
             return saved.acceptsInput
         }, acquireControl: { try FileLock(PhoneAgentPaths.controlLock(phone: phone)) })
         defer { session.close() }
+        let actionLog = PhoneActionLog.url(in: try cli.store.directory(name))
+        session.onAction = { entry in try? PhoneActionLog.append(entry, to: actionLog) }
         let signals = [SIGINT, SIGTERM, SIGHUP]
         let sources = signals.map { number -> DispatchSourceSignal in
             Darwin.signal(number, SIG_IGN)

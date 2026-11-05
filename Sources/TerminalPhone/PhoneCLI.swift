@@ -142,6 +142,14 @@ final class PhoneCLI {
             if let error = reply.error { throw error }
             try printJSON(["ok": true, "name": name, "udid": reply.session.udid, "result": "\(command) completed"])
         case "action": try await action(tail)
+        case "sim": try await simCommand(tail)
+        case "clipboard": try await clipboardCommand(tail)
+        case "log": try await logCommand(tail)
+        case "record": try await recordCommand(tail)
+        case "appstore", "app-store": try await appStoreCommand(tail)
+        case "test", "replay": try await testCommand(tail)
+        case "run": try await runCommand(tail)
+        case "logs": try await logsCommand(tail)
         case "device": try await device(tail)
         case "view":
             let args = try Arguments(tail, flags: ["read-only"], options: ["protocol", "cell-size", "split", "frame"])
@@ -243,7 +251,7 @@ final class PhoneCLI {
     }
 
     func action(_ input: [String]) async throws {
-        let args = try Arguments(input, options: ["output", "duration"])
+        let args = try Arguments(input, flags: ["framed"], options: ["output", "duration"])
         let verbs: Set<String> = ["screenshot", "snapshot", "tap", "swipe", "type", "button", "key", "describe"]
         var positions = args.positionals
         guard !positions.isEmpty else { throw Failure("Usage: terminal-phone action [NAME] screenshot|snapshot|tap|swipe|type|button|describe") }
@@ -252,17 +260,26 @@ final class PhoneCLI {
         let verb = positions.removeFirst()
         guard args.options["output"] == nil || ["snapshot", "screenshot"].contains(verb) else { throw Failure("--output is only supported for screenshots") }
         guard args.options["duration"] == nil || verb == "swipe" else { throw Failure("--duration is only supported for swipes") }
+        guard !args.flags.contains("framed") || ["snapshot", "screenshot"].contains(verb) else { throw Failure("--framed is only supported for screenshots") }
         if !["screenshot", "snapshot", "describe"].contains(verb) {
             try await legacyAgentAction(name: name, verb: verb, values: positions, duration: args.options["duration"]); return
         }
         if let device = try? store.load(name), device.isDevice {
-            try await deviceAction(device, verb: verb, values: positions, output: args.options["output"]); return
+            try await deviceAction(device, verb: verb, values: positions, output: args.options["output"], framed: args.flags.contains("framed")); return
         }
         let (saved, found) = try await phone(name)
         if ["snapshot", "screenshot"].contains(verb) {
             guard positions.isEmpty else { throw Failure("Usage: action [NAME] screenshot [--output PATH]") }
-            let frame = try await capture(saved, scale: screenScale(saved, catalog: found))
+            let scale = try screenScale(saved, catalog: found)
+            let native = try await simctl(["io", saved.udid, "screenshot", "--type=png", "-"], timeout: 15)
             let output = URL(fileURLWithPath: ((args.options["output"] ?? "terminal-phone-\(name).png") as NSString).expandingTildeInPath).standardizedFileURL
+            if args.flags.contains("framed") {
+                let framed = try framedPNG(native, phone: saved, scale: scale)
+                try framed.png.write(to: output, options: .atomic)
+                try printJSON(["ok": true, "name": name, "udid": saved.udid, "image": output.path, "framed": true, "width": framed.width, "height": framed.height, "scale": scale])
+                return
+            }
+            let frame = try resized(native, scale: scale)
             try frame.png.write(to: output, options: .atomic)
             try printJSON(["ok": true, "name": name, "udid": saved.udid, "image": output.path, "width": frame.width, "height": frame.height,
                            "coordinateSpace": "display-points", "nativeWidth": frame.nativeWidth, "nativeHeight": frame.nativeHeight, "scale": frame.scale])
@@ -342,7 +359,7 @@ final class PhoneCLI {
       terminal-phone status|stop [NAME]
       terminal-phone view [NAME] [--split right|left|down|up] [--read-only] [--protocol kitty|iterm|blocks]
       terminal-phone up [NAME] --split right   boot, then open the phone in a pane beside this one
-      terminal-phone view [NAME] --frame orange   frame colour, remembered per phone (Ctrl+F cycles):
+      terminal-phone view [NAME] --frame orange   frame colour, remembered per phone (Ctrl+F picks):
           graphite, black, silver, white, gold, orange, red, pink, yellow, green, blue, purple
       terminal-phone install [NAME] /path/to/simulator-built.app
       terminal-phone launch [NAME] com.example.app
@@ -354,6 +371,34 @@ final class PhoneCLI {
       terminal-phone action [NAME] button HOME|LOCK|SIRI
       terminal-phone action [NAME] key return|backspace|tab|escape|up|down|left|right
       terminal-phone action [NAME] describe
+      terminal-phone action [NAME] screenshot --framed   inside the device frame, transparent corners
+
+    Develop and test:
+      terminal-phone run [NAME] [--scheme S] [--watch] [--split right]   build this folder's Xcode app, install, launch
+      terminal-phone logs [NAME] [--app BUNDLE_ID | --all] [--split right]   stream the app's logs
+      terminal-phone record [NAME] [--output demo.mov|demo.mp4|demo.gif] [--duration 30]   video + a replayable flow
+          [--frame] [--finish orange] [--background midnight|'#0b1d3a,#3a6df0'|photo.jpg] [--caption 'Text']
+      terminal-phone test [--phone NAME] [--junit report.xml] flows/     run flow files; exit 1 on failure
+      terminal-phone replay [--phone NAME] demo.flow.yaml                run a recorded flow again
+      terminal-phone log [NAME] [--tail 50] [--follow] [--json]          every tap and keystroke, by you or an agent
+      In the viewer, Ctrl+R records too (simulators and real iPhones).
+      In the viewer, Ctrl+A opens the App Store panel: screenshots and previews without commands.
+
+    App Store screenshots and previews (exact App Store Connect sizes, no transparency):
+      terminal-phone appstore sizes                                  every display size it accepts
+      terminal-phone appstore screenshot [NAME] [--display auto|6.9|6.3|ipad-13|...] [--output shot.png]
+      terminal-phone appstore record [NAME] [--duration 20] [--output preview.mp4]   886x1920, 30 fps, silent AAC
+      terminal-phone appstore export FILE.png|FILE.mov               convert an existing screenshot or recording
+          style: [--frame] [--finish orange] [--background light|midnight|'#ffffff'|photo.jpg] [--caption 'Track every habit']
+
+    Simulator controls:
+      terminal-phone sim [NAME] statusbar clean|clear      9:41, full battery, full signal
+      terminal-phone sim [NAME] location 37.3349,-122.0090 | clear
+      terminal-phone sim [NAME] push BUNDLE_ID payload.json | --text 'Hello' [--title 'Hi']
+      terminal-phone sim [NAME] permission grant|revoke|reset photos|camera|location|... [BUNDLE_ID]
+      terminal-phone sim [NAME] text-size [extra-large|accessibility-large|...]
+      terminal-phone sim [NAME] appearance [dark|light]    also works on real iPhones
+      terminal-phone clipboard [NAME] push [TEXT] | pull   share the clipboard with the phone
 
     Agent API (JSON; one shared session per phone):
       terminal-phone observe [NAME] [--no-image]

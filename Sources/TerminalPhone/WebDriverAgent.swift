@@ -67,8 +67,9 @@ final class WebDriverAgent: @unchecked Sendable {
 
     /// Display points and the points-to-pixels scale.
     func screen() async throws -> PhoneScreen {
-        let info = try await call("GET", "/wda/screen") as? [String: Any]
-        let size = try await call("GET", "/window/size") as? [String: Any]
+        async let screenInfo = call("GET", "/wda/screen")
+        async let windowSize = call("GET", "/window/size")
+        let info = try await screenInfo as? [String: Any], size = try await windowSize as? [String: Any]
         guard let scale = (info?["scale"] as? NSNumber)?.doubleValue, (1...4).contains(scale),
               let width = (size?["width"] as? NSNumber)?.doubleValue, let height = (size?["height"] as? NSNumber)?.doubleValue,
               width > 0, height > 0 else { throw Failure("WebDriverAgent did not report the screen size") }
@@ -81,9 +82,13 @@ final class WebDriverAgent: @unchecked Sendable {
         return data
     }
     /// Configures the MJPEG server on port 9100. `scale` is a fraction of the native resolution.
+    /// WDA applies the scale when a stream connection opens, not to one already streaming.
     func configureStream(scale: Double, fps: Int = 30, quality: Int = 80) async throws {
         try await call("POST", "/appium/settings", ["settings": ["mjpegServerFramerate": fps, "mjpegServerScreenshotQuality": quality,
-                                                                  "mjpegScalingFactor": Int((scale * 100).rounded()), "mjpegFixOrientation": true]], inSession: true)
+                                                                  "mjpegScalingFactor": Int((scale * 100).rounded()), "mjpegFixOrientation": true,
+                                                                  // By default XCTest holds every event until the app idles (up to 10 s) and
+                                                                  // animations cool off (2 s). Someone watching live video doesn't need that.
+                                                                  "waitForIdleTimeout": 0, "animationCoolOffTimeout": 0]], inSession: true)
     }
 
     // MARK: Input

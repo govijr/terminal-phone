@@ -25,8 +25,24 @@ enum PhoneDevices {
         return device
     }
 
+    /// The last ready client per phone. One `up` or `view` connects several times in a row;
+    /// reusing it skips the device lookup, the WDA probe, and the session lookup on each.
+    private static var recent: [String: (agent: WebDriverAgent, at: Date)] = [:]
+    private static let reuseWindow: TimeInterval = 15
+
+    /// Drops the remembered client, e.g. after the tunnel moved to a new address.
+    static func forget(_ phone: Phone) { recent[phone.udid.uppercased()] = nil }
+
     /// A ready WebDriverAgent client, starting the runner if it isn't already serving.
     static func connect(_ cli: PhoneCLI, _ phone: Phone, progress: Bool = true) async throws -> WebDriverAgent {
+        let key = phone.udid.uppercased()
+        if let hit = recent[key], Date().timeIntervalSince(hit.at) < reuseWindow { return hit.agent }
+        let agent = try await open(cli, phone, progress: progress)
+        recent[key] = (agent, Date())
+        return agent
+    }
+
+    private static func open(_ cli: PhoneCLI, _ phone: Phone, progress: Bool) async throws -> WebDriverAgent {
         var device = try await find(cli, phone)
         if !device.reachable, device.pairing == "paired" {
             // CoreDevice opens its USB/Wi-Fi tunnel on demand; asking for device details opens it.
@@ -54,7 +70,8 @@ enum PhoneDevices {
             if text.contains("** TEST FAILED **") || text.contains("Testing failed") || text.contains("** TEST EXECUTE FAILED **") {
                 throw Failure("WebDriverAgent failed to start on \(device.name). Details: \(log.path)")
             }
-            try await Task.sleep(nanoseconds: 1_000_000_000)
+            // A refused connection returns at once, so probing often costs little and catches readiness sooner.
+            try await Task.sleep(nanoseconds: 250_000_000)
         }
         throw Failure("WebDriverAgent didn't start within two minutes. Is \(device.name) unlocked? Details: \(log.path)")
     }
@@ -86,6 +103,7 @@ enum PhoneDevices {
     /// Ends the runner this tool started. Returns whether one was running.
     @discardableResult
     static func stopRunner(_ cli: PhoneCLI, _ phone: Phone) -> Bool {
+        forget(phone)
         guard let file = try? pidFile(cli, phone), let text = try? String(contentsOf: file, encoding: .utf8),
               let pid = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 1 else { return false }
         try? FileManager.default.removeItem(at: file)

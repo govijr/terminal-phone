@@ -108,15 +108,22 @@ extension PhoneCLI {
     }
 
     /// Legacy read commands retain their output shape. All mutations use PhoneAgentSession.
-    func deviceAction(_ phone: Phone, verb: String, values: [String], output: String?) async throws {
+    func deviceAction(_ phone: Phone, verb: String, values: [String], output: String?, framed: Bool = false) async throws {
         let agent = try await PhoneDevices.connect(self, phone)
         var result: [String: Any] = ["ok": true, "name": phone.name, "udid": phone.udid, "kind": "device"]
         switch verb {
         case "screenshot", "snapshot":
             guard values.isEmpty else { throw Failure("Usage: action [NAME] screenshot [--output PATH]") }
             let screen = try await agent.screen()
-            let frame = try resized(try await agent.screenshot(), scale: screen.scale)
+            let native = try await agent.screenshot()
             let url = URL(fileURLWithPath: ((output ?? "terminal-phone-\(phone.name).png") as NSString).expandingTildeInPath).standardizedFileURL
+            if framed {
+                let image = try framedPNG(native, phone: phone, scale: screen.scale)
+                try image.png.write(to: url, options: .atomic)
+                result.merge(["image": url.path, "framed": true, "width": image.width, "height": image.height, "scale": screen.scale]) { $1 }
+                break
+            }
+            let frame = try resized(native, scale: screen.scale)
             try frame.png.write(to: url, options: .atomic)
             result.merge(["image": url.path, "width": frame.width, "height": frame.height, "coordinateSpace": "display-points",
                           "nativeWidth": frame.nativeWidth, "nativeHeight": frame.nativeHeight, "scale": frame.scale]) { $1 }

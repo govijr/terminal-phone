@@ -94,13 +94,14 @@ enum TerminalSplit {
 
     /// Opens the split. Returns what was done, for the caller's JSON.
     @MainActor
-    static func open(name: String, direction: SplitDirection, extraArguments: [String] = []) async throws -> [String: Any] {
+    /// `arguments` is the terminal-phone command for the new pane; by default, the viewer.
+    static func open(name: String, direction: SplitDirection, extraArguments: [String] = [], arguments: [String]? = nil) async throws -> [String: Any] {
         let env = ProcessInfo.processInfo.environment
         let tmuxClient = env["TMUX"] != nil ? (try? await CommandRunner.checked(find("tmux") ?? "/usr/bin/false", ["display-message", "-p", "#{client_termname}"], timeout: 5))
             .map { String(decoding: $0, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) } : nil
         let profile = TerminalProfile.detect(env, tmuxClientTerm: tmuxClient)
         let executable = Bundle.main.executableURL!.resolvingSymlinksInPath().path
-        let command = paneCommand(executable: executable, arguments: ["view", name] + extraArguments, environment: env)
+        let command = paneCommand(executable: executable, arguments: arguments ?? ["view", name] + extraArguments, environment: env)
         let plan = try plan(profile: profile, environment: env, direction: direction, command: command,
                             directory: FileManager.default.currentDirectoryPath, tty: await callerTTY(), find: find)
         for step in plan.steps {

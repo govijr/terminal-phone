@@ -85,7 +85,8 @@ final class SimulatorPhoneBackend: PhoneBackend {
                 _ = try await cli.simctl(["install", phone.udid, app.path], timeout: 120)
             case .launch:
                 try PhoneAgentBackends.validateBundle(action.text!)
-                _ = try await cli.simctl(["launch", phone.udid, action.text!])
+                // Like a real iPhone's launch, start fresh so a rebuilt app actually runs.
+                _ = try await cli.simctl(["launch", "--terminate-running-process", phone.udid, action.text!])
             default:
                 try PhoneAgentBackends.validateURL(action.text!)
                 _ = try await cli.simctl(["openurl", phone.udid, action.text!])
@@ -154,7 +155,7 @@ final class DevicePhoneBackend: PhoneBackend {
                                      elements: PhoneAccessibility.elements(from: source, width: frame.width, height: frame.height))
             scene = current
             return PhoneCapture(scene: current, png: frame.png, startedAt: started, finishedAt: Date())
-        } catch { agent = nil; throw AgentError.backend(error) }
+        } catch { agent = nil; PhoneDevices.forget(phone); throw AgentError.backend(error) }
     }
     func perform(_ action: PhoneAction, target: PhoneElement?) async throws {
         let current = try cli.store.load(phone.name)

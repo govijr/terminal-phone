@@ -7,14 +7,16 @@ import TerminalPhoneCore
 final class PhoneViewer {
     /// Every interactive terminal works: inline images where the terminal has them, text blocks elsewhere.
     static var supportsCurrentTerminal: Bool { isatty(0) == 1 && isatty(1) == 1 }
-    private enum Link: Equatable { case connecting(String), live, polling }
-    private enum Action: Equatable { case menu, select(String), zoomOut, zoomFit, zoomActual, zoomIn, home, lock, screenshot, record, appearance, control }
+    private enum Link: Equatable { case connecting(String), live, polling, waiting(String) }
+    private enum Action: Equatable { case menu, select(String), zoomOut, zoomFit, zoomActual, zoomIn, home, lock, screenshot, record, appearance, control, frames, pickFrame(FrameFinish), tools, tool(Tool), logs, appStore, studio(StudioItem) }
     private struct Hit { let row: Int; let columns: ClosedRange<Int>; let action: Action }
     private struct Layout: Equatable {
         let viewport: PhoneViewport
         let columns: Int, rows: Int
         /// Roomy panes get a two-line header, a divider and a pill toolbar; small ones one line each.
         let roomy: Bool
+        /// The logs panel, beside the phone in wide panes and below it in narrow ones.
+        var logPanel: CellRect? = nil
     }
     private struct Activity { let at: Date; let text: String; let ok: Bool; let milliseconds: Double? }
     private struct MenuItem { let name: String; let detail: String; let state: String }
@@ -38,6 +40,8 @@ final class PhoneViewer {
     private var streamScale = 0.0, pendingScale: (value: Double, since: Date)?
     private var failure: String?
     private var quit = false, liveReady = false, link = Link.connecting("Starting video stream")
+    /// A real iPhone that WebDriverAgent reports as locked: iOS ignores input until it's unlocked.
+    private var phoneLocked = false
     private var layout: Layout?, size = winsize()
     private var zoom = 1.0, pan = (x: 0.5, y: 0.5)
     private var metrics = PhoneMetricFilter()
@@ -51,14 +55,27 @@ final class PhoneViewer {
     private var fps = 0.0, fpsSample = (frames: 0, at: Date())
     private var hits: [Hit] = [], flash: (action: Action, at: Date)?
     private var menu: [MenuItem]?, menuIndex = 0, menuArea: (column: Int, row: Int, width: Int, height: Int)?
-    private var recording: (process: Process, url: URL, started: Date)?
+    private var recording: PhoneRecording?, startingRecording = false
     private var dark: Bool?
-    /// The phone's frame colour. Ctrl+F cycles it; the choice is saved per phone.
+    /// The phone's frame colour, saved per phone. Ctrl+F opens the picker.
     private var finish: FrameFinish
+    /// The open frame picker: the finish to restore on Esc, and the highlighted row.
+    private var picker: (original: FrameFinish, index: Int)?
+    /// The open Tools panel's highlighted row, and what it last learned about the phone.
+    private var tools: Int?, toolBusy = false
+    private var statusBarClean: Bool?, textSize: String?, locationIndex: Int?
+    /// The logs panel's stream and what it shows.
+    private var logTail: PhoneLogTail?, logTitle = ""
+    /// The open App Store panel's highlighted row, its settings, and the caption being typed.
+    private var studio: Int?, studioSettings: AppStoreSettings, captionDraft: String?
+    /// Set while an App Store preview records: how to compose it when it stops.
+    private var recordingStyle: (style: MediaStyle, points: Double)?
+    private var mediaTask: Task<Void, Never>?, lastMedia: URL?
 
     init(cli: PhoneCLI, phone: Phone, screen: PhoneScreen, graphics: String?, readOnly: Bool, cellSize: String? = nil) throws {
         self.cli = cli; self.phone = phone; self.screen = screen; self.viewOnly = readOnly
         finish = Self.savedFrame(for: phone.name, store: cli.store)
+        studioSettings = (try? PhoneConfiguration.load(store: cli.store))?.appStore ?? AppStoreSettings()
         let e = ProcessInfo.processInfo.environment
         if let graphics, GraphicsMode(rawValue: graphics) == nil { throw Failure("--protocol must be kitty, iterm or blocks") }
         requestedGraphics = graphics.flatMap(GraphicsMode.init(rawValue:))
@@ -156,7 +173,7 @@ final class PhoneViewer {
         if let probe { writer.write(probe.query) }
         defer {
             renderer.configure(placement: nil)
-            live?.stop(); polling?.cancel(); switching?.cancel()
+            live?.stop(); polling?.cancel(); switching?.cancel(); logTail?.stop()
             stopRecording(wait: true)
             probe?.cleanup()
             writer.write(renderer.clear() + "\u{1b}[0m\u{1b}[2J\u{1b}[?1002l\u{1b}[?1000l\u{1b}[?1006l\u{1b}[?25h\u{1b}[?1049l")
@@ -210,6 +227,9 @@ final class PhoneViewer {
             if Date().timeIntervalSince(lastChrome) >= 0.08 { lastChrome = Date(); drawChrome() }
             try await Task.sleep(nanoseconds: 4_000_000)
         }
+        // An App Store preview is encoded after recording stops; finish it before leaving.
+        if recordingStyle != nil { stopRecording(wait: false) }
+        if let mediaTask { record("Saving the app preview…", ok: true); previousChrome = ""; drawChrome(); await mediaTask.value }
         if let failure { throw Failure(failure) }
     }
 
@@ -226,6 +246,13 @@ final class PhoneViewer {
             guard let self else { return }
             switch event["event"] as? String {
             case "ready": liveReady = true; link = .live
+            case "locked":
+                phoneLocked = true; queue.removeAll()
+                record("\(self.phone.displayModel) is locked. Unlock it to continue.", ok: false)
+            case "unlocked": phoneLocked = false; record("\(self.phone.displayModel) unlocked", ok: true)
+            case "waiting":
+                let message = event["message"] as? String ?? "Waiting for the iPhone"
+                link = .waiting(message); queue.removeAll(); record(message, ok: false)
             case "fatal": failure = event["error"] as? String ?? "Live stream failed"; quit = true
             default: break
             }
@@ -257,7 +284,9 @@ final class PhoneViewer {
     }
     /// Stream just enough pixels for the on-screen phone, in eighths of the native framebuffer.
     private func streamScale(for viewport: PhoneViewport) -> Double {
-        min(1, max(0.25, (viewport.frame.screenHeight * viewport.scale / Double(screen.nativeHeight) * 8).rounded(.up) / 8))
+        let wanted = min(1, max(0.25, (viewport.frame.screenHeight * viewport.scale / Double(screen.nativeHeight) * 8).rounded(.up) / 8))
+        // Real iPhones never stream above the cap, so growing past it must not restart anything.
+        return phone.isDevice ? min(wanted, DeviceLiveSession.maxScale) : wanted
     }
     /// Restarts the stream when the phone grows past the streamed resolution, or shrinks far below it.
     private func rescaleStreamIfNeeded() {
@@ -267,6 +296,14 @@ final class PhoneViewer {
         if pendingScale?.value != wanted { pendingScale = (wanted, Date()); return }
         guard let pending = pendingScale, Date().timeIntervalSince(pending.since) > 0.6, inFlight == nil else { return }
         pendingScale = nil
+        if let device = live as? DeviceLiveSession {
+            streamScale = wanted
+            Task { @MainActor [weak self] in
+                do { try await device.rescale(wanted) }
+                catch { guard let self, self.live === device else { return }; self.live?.stop(); self.live = nil; self.startStream() }
+            }
+            return
+        }
         live?.stop(); live = nil
         startStream()
     }
@@ -289,10 +326,20 @@ final class PhoneViewer {
         // Roomy: two header lines and a divider on top, a three-line toolbar below.
         let roomy = rows >= 20 && cols >= 30
         let top = roomy ? 4 : 2, bottom = roomy ? rows - 3 : rows - 1
+        var phoneColumns = cols, phoneRows = max(1, bottom - top + 1), logPanel: CellRect?
+        if logTail != nil {
+            if cols >= 100 {
+                let width = min(110, max(40, cols * 45 / 100))
+                logPanel = CellRect(column: cols - width + 1, row: top, columns: width, rows: phoneRows); phoneColumns = cols - width - 1
+            } else if phoneRows >= 12 {
+                let height = max(5, phoneRows * 2 / 5)
+                logPanel = CellRect(column: 1, row: bottom - height + 1, columns: cols, rows: height); phoneRows -= height
+            }
+        }
         let viewport = PhoneViewport(frame: DeviceFrame(screenWidth: screen.width, screenHeight: screen.height, finish: finish),
-                                     column: 1, row: top, columns: cols, rows: max(1, bottom - top + 1),
+                                     column: 1, row: top, columns: phoneColumns, rows: phoneRows,
                                      cellWidth: cw * metrics.cellScale, cellHeight: ch * metrics.cellScale, zoom: zoom, pan: pan)
-        let next = Layout(viewport: viewport, columns: cols, rows: rows, roomy: roomy)
+        let next = Layout(viewport: viewport, columns: cols, rows: rows, roomy: roomy, logPanel: logPanel)
         let palette = Palette.matching(background: metrics.background)
         if palette != Theme.palette { Theme.palette = palette; previousChrome = "" }
         guard clear || next != layout else { return }
@@ -353,28 +400,34 @@ final class PhoneViewer {
             output += Box.line(column: column, row: row, width: width, spans)
         }
         func pressed(_ action: Action) -> Bool { flash?.action == action && now.timeIntervalSince(flash!.at) < 0.18 }
-        func icon(_ glyph: String, _ action: Action, style: String = Theme.text) -> ([Span], Action?) {
-            ([Span(" \(glyph) ", pressed(action) ? Theme.key : style)], action)
-        }
 
-        // Header: "terminal-phone · default ⌄" opens the device menu; FPS and zoom on the right.
-        let title: [Span] = [Span(" terminal-phone", Theme.bold + Theme.text), Span(" · ", Theme.faint),
-                             Span(phone.name, Theme.bold + Theme.accent), Span(" " + Theme.glyphs.menu, menu != nil ? Theme.accent : Theme.muted)]
-        let rate: [Span] = switch link {
-        case .connecting: [Span("\(spin) connecting", Theme.yellow)]
-        case .polling: [Span("FPS: ", Theme.muted), Span("screenshots", Theme.cyan)]
-        case .live: [Span("FPS: ", Theme.muted), fps >= 0.5 ? Span("\(Int(fps.rounded()))", fps >= 20 ? Theme.green : Theme.yellow) : Span("idle", Theme.text)]
-        }
-        let zoomText = abs(zoom - 1) < 0.01 ? [] : [Span("  \(Int((zoom * 100).rounded()))%", Theme.faint)]
-        var right: [([Span], Action?)] = [(rate + zoomText + [Span("  ")], nil)]
+        // Header: "terminal-phone · default ⌄" opens the device menu. On the right, the stream's
+        // state and a small zoom control: − and + step, the middle resets to fit (or 1:1 from fit).
         let g = Theme.glyphs
-        let zoomButtons = [icon(g.zoomOut, .zoomOut), ([Span("│", Theme.border)], nil), icon(g.zoomFit, .zoomFit), ([Span("│", Theme.border)], nil),
-                           icon(g.zoomActual, .zoomActual), ([Span("│", Theme.border)], nil), icon(g.zoomIn, .zoomIn), ([Span(" ")], nil)]
-        if title.width + 2 + right.reduce(0, { $0 + $1.0.width }) + zoomButtons.reduce(0, { $0 + $1.0.width }) <= cols { right += zoomButtons }
-        else if title.width + 2 + right.reduce(0, { $0 + $1.0.width }) > cols { right = [] }
+        let title: [Span] = [Span(" terminal-phone", Theme.bold + Theme.text), Span(" · ", Theme.faint),
+                             Span(phone.name, Theme.bold + Theme.accent), Span(" " + g.menu, menu != nil ? Theme.accent : Theme.muted)]
+        let state: [Span] = switch link {
+        case .connecting: [Span("\(spin) Connecting", Theme.yellow)]
+        case .waiting: [Span("\(spin) Waiting for iPhone", Theme.yellow)]
+        case .live where phoneLocked: [Span(g.live + " ", Theme.yellow), Span("Locked", Theme.yellow)]
+        case .polling: [Span(g.live + " ", Theme.cyan), Span("Screenshots", Theme.muted)]
+        case .live: [Span(g.live + " ", Theme.green), Span("Live", Theme.text)] + (fps >= 0.5 ? [Span(" · \(Int(fps.rounded())) fps", Theme.muted)] : [])
+        }
+        let fitted = abs(zoom - 1) < 0.01
+        let zoomLabel = fitted ? g.zoomFit : "\(Int((zoom * 100).rounded()))%"
+        let zoomControl: [([Span], Action?)] = [
+            ([Span("Zoom ", Theme.faint)], nil),
+            ([Span(" \(g.zoomOut) ", pressed(.zoomOut) ? Theme.key : Theme.text + Theme.bg(Theme.palette.keyBackground))], .zoomOut),
+            ([Span(" \(zoomLabel) ", pressed(fitted ? .zoomActual : .zoomFit) ? Theme.key : Theme.muted)], fitted ? .zoomActual : .zoomFit),
+            ([Span(" \(g.zoomIn) ", pressed(.zoomIn) ? Theme.key : Theme.text + Theme.bg(Theme.palette.keyBackground))], .zoomIn), ([Span(" ")], nil)]
+        var right: [([Span], Action?)] = [(state, nil)]
+        let zoomWidth = zoomControl.reduce(0) { $0 + $1.0.width } + 3
+        if title.width + state.width + zoomWidth + 2 <= cols { right += [([Span("   ")], nil)] + zoomControl }
+        else if title.width + state.width + 3 <= cols { right += [([Span(" ")], nil)] }
+        else { right = [] }
         row(1, left: [(title, .menu)], right: right)
         if layout.roomy {
-            let subtitle = [Span("  \(phone.displaySystem)", Theme.muted), Span(" · \(phone.displayModel)\(phone.isDevice ? " · real iPhone" : "")", Theme.faint),
+            let subtitle = [Span("  \(phone.displayModel)", Theme.muted), Span(" · \(phone.displaySystem)\(phone.isDevice ? " · real iPhone" : "")", Theme.faint),
                             Span(readOnly ? " · View only" : " · Interactive", readOnly ? Theme.yellow : Theme.green)]
             row(2, left: [(subtitle, .menu)], right: [(statusLine(now: now, room: cols - subtitle.width - 4), nil)])
             output += "\u{1b}[3;1H" + [Span(String(repeating: "─", count: cols), Theme.border)].rendered
@@ -385,7 +438,7 @@ final class PhoneViewer {
         let splashRow = screenCells.row + screenCells.rows / 2 - 1
         if stats.frames == 0 || switching != nil {
             let message: String = switch link {
-            case .connecting(let text): text
+            case .connecting(let text), .waiting(let text): text
             case .polling: "Waiting for a screenshot"
             case .live: "Waiting for the first frame"
             }
@@ -413,9 +466,12 @@ final class PhoneViewer {
         var groups: [[(String, String, Action, String)]] = []
         groups.append([(g.home, "Home", .home, readOnly ? Theme.muted : Theme.text), (g.lock, "Lock", .lock, readOnly ? Theme.muted : Theme.text)])
         groups.append([(readOnly ? g.controlOff : g.control, readOnly ? "Enable control" : "Control on", .control, readOnly ? Theme.yellow : Theme.green)])
-        // Recording uses simctl, so real iPhones get screenshots only.
-        groups.append([(g.screenshot, "Screenshot", .screenshot, Theme.text)] + (phone.isDevice ? [] : [(recording == nil ? g.record : g.stop, recordLabel, .record, recording == nil ? Theme.text : Theme.red)]))
-        if dark != nil && !readOnly { groups.append([(dark == true ? g.light : g.dark, dark == true ? "Light" : "Dark", .appearance, Theme.text)]) }
+        groups.append([(g.screenshot, "Screenshot", .screenshot, Theme.text), (recording == nil ? g.record : g.stop, recordLabel, .record, recording == nil ? Theme.text : Theme.red),
+                       (g.appStore, "App Store", .appStore, studio != nil ? Theme.accent : Theme.magenta)])
+        var look: [(String, String, Action, String)] = [(g.frame, "Frame", .frames, picker != nil ? Theme.accent : Theme.text)]
+        if dark != nil && !readOnly { look.append((dark == true ? g.light : g.dark, dark == true ? "Light" : "Dark", .appearance, Theme.text)) }
+        groups.append(look)
+        groups.append([(g.tools, "Tools", .tools, tools != nil ? Theme.accent : Theme.text), (g.logs, "Logs", .logs, Theme.text)])
         func toolbar(labels: Bool) -> [([Span], Action?)] {
             var items: [([Span], Action?)] = []
             for (index, group) in groups.enumerated() {
@@ -441,7 +497,9 @@ final class PhoneViewer {
         }
 
         let maskBefore = menuArea.map { [$0.column, $0.row, $0.width, $0.height] }
-        if let menu { output += drawMenu(menu) }
+        if let panel = layout.logPanel { output += drawLogs(panel) }
+        if let menu { output += drawMenu(menu) } else if picker != nil { output += drawFramePicker() } else if tools != nil { output += drawTools() }
+        else if studio != nil { output += drawStudio() }
         if menuArea.map({ [$0.column, $0.row, $0.width, $0.height] }) != maskBefore { renderer.configure(placement: placement) }
 
         guard output != previousChrome else { return }
@@ -456,9 +514,8 @@ final class PhoneViewer {
                 (last.milliseconds.map { [Span(" · \(Int($0.rounded())) ms", Theme.faint)] } ?? []) + [Span(" ")]
             return toast.truncated(max(0, room))
         }
-        let hints: [Span] = [Span("⌃P", Theme.cyan), Span(" devices  ", Theme.faint), Span("⌃S", Theme.cyan), Span(" screenshot  ", Theme.faint),
-                             Span("⌃]", Theme.cyan), Span(" quit ", Theme.faint)]
-        return hints.width <= room ? hints : Array(hints.suffix(2)).width <= room ? Array(hints.suffix(2)) : []
+        let hint: [Span] = [Span("⌃]", Theme.cyan), Span(" quit ", Theme.faint)]
+        return hint.width <= room ? hint : []
     }
 
     /// A dropdown of registered phones under the title. Every cell has a background so it covers the phone image.
@@ -491,6 +548,37 @@ final class PhoneViewer {
         return output
     }
 
+    /// The frame picker: a swatch and name per finish, beside the phone. Moving through it
+    /// previews each finish on the phone itself.
+    private func drawFramePicker() -> String {
+        guard let layout, let picker else { return "" }
+        let surface = Theme.surface, selected = Theme.selected
+        let all = FrameFinish.allCases, width = min(layout.columns - 2, 30)
+        let top = layout.roomy ? 4 : 2
+        let visible = max(1, min(all.count, layout.rows - top - 3))
+        let first = min(max(0, picker.index - visible + 1), all.count - visible)
+        let column = 2
+        var output = ""
+        func paint(_ row: Int, _ spans: [Span], background: String) {
+            let fitted = spans.truncated(width)
+            output += "\u{1b}[\(row);\(column)H" + fitted.map { Span($0.text, background + $0.style) }.rendered +
+                [Span(String(repeating: " ", count: max(0, width - fitted.width)), background)].rendered
+        }
+        paint(top, [Span("╭─ ", Theme.border), Span("Frame", Theme.bold + Theme.accent), Span(" " + String(repeating: "─", count: max(0, width - 11)) + "╮", Theme.border)], background: surface)
+        for (offset, option) in all[first..<(first + visible)].enumerated() {
+            let index = first + offset, row = top + 1 + offset
+            let left: [Span] = [Span("│ ", Theme.border), Span("██", Theme.fg(option.band)), Span(" "), Span(option.displayName, (option == finish ? Theme.bold : "") + Theme.text)]
+            let tail = [Span(option == picker.original ? Theme.glyphs.check + " " : "  ", Theme.accent), Span("│", Theme.border)]
+            paint(row, left + [Span(String(repeating: " ", count: max(1, width - left.width - tail.width)))] + tail, background: index == picker.index ? selected : surface)
+            hits.insert(Hit(row: row, columns: column...(column + width - 1), action: .pickFrame(option)), at: 0)
+        }
+        let help = [Span("│ ", Theme.border), Span("↑↓", Theme.cyan), Span(" try ", Theme.faint), Span("⏎", Theme.cyan), Span(" keep ", Theme.faint), Span("esc", Theme.cyan), Span(" undo", Theme.faint)]
+        paint(top + visible + 1, help + [Span(String(repeating: " ", count: max(1, width - help.width - 1))), Span("│", Theme.border)], background: surface)
+        paint(top + visible + 2, [Span("╰" + String(repeating: "─", count: max(0, width - 2)) + "╯", Theme.border)], background: surface)
+        menuArea = (column, top, width, visible + 3)
+        return output
+    }
+
     private func record(_ text: String, ok: Bool, milliseconds: Double? = nil) {
         activity.append(Activity(at: Date(), text: text, ok: ok, milliseconds: milliseconds))
         if activity.count > 50 { activity.removeFirst(activity.count - 50) }
@@ -505,11 +593,26 @@ final class PhoneViewer {
         guard var config = try? PhoneConfiguration.load(store: store) else { return }
         config.setFrame(finish, for: phone); try? config.save(store: store)
     }
-    private func cycleFrame() {
-        finish = finish.next
-        Self.saveFrame(finish, for: phone.name, store: cli.store)
+    private func openFramePicker() {
+        if menu != nil || tools != nil || studio != nil { closeMenu() }
+        picker = (finish, FrameFinish.allCases.firstIndex(of: finish) ?? 0)
+        previousChrome = ""
+    }
+    /// Shows a finish on the phone without saving it.
+    private func previewFrame(_ option: FrameFinish) {
+        if picker != nil { picker!.index = FrameFinish.allCases.firstIndex(of: option) ?? 0 }
+        previousChrome = ""
+        guard option != finish else { return }
+        finish = option
         relayout()
-        renderer.redraw()
+    }
+    /// Closes the picker, keeping the previewed finish or going back to the one it opened with.
+    private func closeFramePicker(keep: Bool) {
+        guard let original = picker?.original else { return }
+        closeMenu()
+        if !keep { previewFrame(original); return }
+        guard finish != original else { return }
+        Self.saveFrame(finish, for: phone.name, store: cli.store)
         record("Frame: \(finish.displayName)", ok: true)
     }
 
@@ -517,6 +620,8 @@ final class PhoneViewer {
         flash = (action, Date())
         switch action {
         case .menu: menu == nil ? openMenu() : closeMenu()
+        case .frames: picker == nil ? openFramePicker() : closeFramePicker(keep: true)
+        case .pickFrame(let option): previewFrame(option)
         case .select(let name): closeMenu(); switchPhone(to: name)
         case .zoomOut: setZoom(Self.zoomSteps.last(where: { $0 < zoom - 0.001 }) ?? 0.3)
         case .zoomIn: setZoom(Self.zoomSteps.first(where: { $0 > zoom + 0.001 }) ?? 4)
@@ -528,6 +633,11 @@ final class PhoneViewer {
         case .screenshot: screenshot()
         case .record: recording == nil ? startRecording() : stopRecording(wait: false)
         case .appearance: toggleAppearance()
+        case .tools: tools == nil ? openTools() : closeMenu()
+        case .tool(let tool): if let index = toolList().firstIndex(where: { $0.tool == tool }) { tools = index }; runTool(tool)
+        case .logs: openLogs()
+        case .appStore: studio == nil ? openStudio() : closeMenu()
+        case .studio(let item): if let index = studioRows().firstIndex(where: { $0.item == item }) { studio = index }; runStudio(item, step: 0)
         case .control:
             if !phone.acceptsInput {
                 record("Real iPhone input needs owner approval. Run terminal-phone connect.", ok: false)
@@ -542,6 +652,8 @@ final class PhoneViewer {
     private static let zoomSteps = [0.3, 0.5, 0.67, 0.8, 1, 1.25, 1.5, 2, 3, 4]
 
     private func openMenu() {
+        if picker != nil { closeFramePicker(keep: true) }
+        if tools != nil || studio != nil { closeMenu() }
         menu = []; menuIndex = 0
         Task { @MainActor in
             let catalog = try? await cli.catalog()
@@ -558,8 +670,8 @@ final class PhoneViewer {
         }
     }
     private func closeMenu() {
-        guard menu != nil else { return }
-        menu = nil
+        guard menu != nil || picker != nil || tools != nil || studio != nil else { return }
+        menu = nil; picker = nil; tools = nil; studio = nil; captionDraft = nil
         if let area = menuArea {
             // Default-background spaces let the phone image show through again.
             writer.write((area.row..<(area.row + area.height)).map { "\u{1b}[\($0);\(area.column)H\u{1b}[0m" + String(repeating: " ", count: area.width) }.joined())
@@ -573,6 +685,7 @@ final class PhoneViewer {
     private func switchPhone(to name: String) {
         guard name != phone.name, switching == nil else { return }
         stopRecording(wait: false)
+        if logTail != nil { closeLogs() }
         live?.stop(); live = nil; polling?.cancel(); polling = nil
         liveReady = false; queue.removeAll(); inFlight = nil
         link = .connecting("Opening \(name)")
@@ -622,25 +735,49 @@ final class PhoneViewer {
             catch { record("Screenshot failed: \(error.localizedDescription)", ok: false) }
         }
     }
-    private func startRecording() {
-        guard !phone.isDevice else { return }
-        let url = outputURL("recording", "mov")
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: cli.xcrun)
-        process.arguments = ["simctl", "io", phone.udid, "recordVideo", "--codec=h264", "--force", url.path]
-        process.standardInput = FileHandle.nullDevice; process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
-        do { try process.run(); recording = (process, url, Date()); record("recording…", ok: true) }
-        catch { record("Recording failed: \(error.localizedDescription)", ok: false) }
+    /// Records the screen, and the input during it as a flow that `terminal-phone replay` runs again.
+    /// An App Store preview records to a temporary movie that is composed and encoded when it stops.
+    private func startRecording(appStore: Bool = false) {
+        guard recording == nil, !startingRecording else { return }
+        startingRecording = true
+        let url = appStore ? FileManager.default.temporaryDirectory.appendingPathComponent("terminal-phone-\(UUID().uuidString).mov") : outputURL("recording", "mov")
+        let phone = phone, style = appStore ? studioSettings.style(finish: finish) : nil, points = Double(min(screen.width, screen.height))
+        Task { @MainActor in
+            defer { startingRecording = false }
+            do {
+                let started = try await PhoneRecording.start(cli: cli, phone: phone, movie: url)
+                guard phone.name == self.phone.name, !quit else { started.stop(); return }
+                recording = started; recordingStyle = style.map { ($0, points) }
+                record(appStore ? "Recording the app preview — App Store wants 15–30 s" : "recording…", ok: true)
+            } catch { record("Recording failed: \(error.localizedDescription)", ok: false) }
+        }
     }
-    /// simctl finishes writing the movie when interrupted.
     private func stopRecording(wait: Bool) {
         guard let current = recording else { return }
         recording = nil
-        current.process.interrupt()
-        if wait {
-            let deadline = Date().addingTimeInterval(5)
-            while current.process.isRunning && Date() < deadline { usleep(20_000) }
-        } else { record("saved \(current.url.lastPathComponent)", ok: true) }
+        guard let (style, points) = recordingStyle else {
+            let flow = current.stop()
+            if !wait { record("saved \(current.movie.lastPathComponent)\(flow == nil ? "" : " + flow")", ok: true) }
+            return
+        }
+        recordingStyle = nil
+        let output = outputURL("App Store preview", "mp4"), seconds = Date().timeIntervalSince(current.started)
+        _ = current.stop(flowNextTo: output)
+        record("Encoding the app preview…", ok: true)
+        let movie = current.movie
+        mediaTask = Task { @MainActor in
+            defer { try? FileManager.default.removeItem(at: movie); mediaTask = nil; previousChrome = "" }
+            do {
+                // Encoding takes a few seconds; keep the viewer responsive meanwhile.
+                let result = try await Task.detached {
+                    try await MediaVideoExport.export(movie, to: output, style: style, pointWidth: points, recordedSeconds: seconds, maxSeconds: AppPreviewRules.maximumSeconds)
+                }.value
+                lastMedia = output
+                if result.seconds < AppPreviewRules.minimumSeconds {
+                    record("Saved \(output.lastPathComponent), but it is \(Int(result.seconds)) s — App Store needs 15–30 s", ok: false)
+                } else { record("Saved \(output.lastPathComponent) · \(result.size.width)×\(result.size.height)", ok: true) }
+            } catch { record("App preview failed: \(error.localizedDescription)", ok: false) }
+        }
     }
     private func refreshAppearance() {
         // A real iPhone can't report its appearance, so the toggle stays hidden there.
@@ -678,6 +815,8 @@ final class PhoneViewer {
 
     private func enqueue(_ action: String, _ values: [String], label: String, duration: Double? = nil, wheel: Bool = false) {
         guard !readOnly else { record("View only — select Enable control to interact", ok: false); return }
+        if phoneLocked { record("\(phone.displayModel) is locked. Unlock it to continue.", ok: false); return }
+        if case .waiting(let message) = link { record(message, ok: false); return }
         if action == "type", queue.last?["action"] as? String == "type", let previous = queue.last?["values"] as? [String], previous[0].utf8.count + values[0].utf8.count < 32768 {
             let text = previous[0] + values[0]
             queue[queue.count - 1]["values"] = [text]; queue[queue.count - 1]["label"] = Self.typeLabel(text); return
@@ -709,6 +848,58 @@ final class PhoneViewer {
                 }
                 continue
             }
+            if captionDraft != nil {
+                switch event {
+                case .text(let value): captionDraft! += value; previousChrome = ""
+                case .key("backspace"): if !captionDraft!.isEmpty { captionDraft!.removeLast() }; previousChrome = ""
+                case .key("return"): commitCaption()
+                case .key("escape"): captionDraft = nil; previousChrome = ""
+                case .mouse: handleMouse(event)
+                default: break
+                }
+                continue
+            }
+            if let index = studio {
+                let rows = studioRows()
+                switch event {
+                case .key("up"): studio = max(0, index - 1); previousChrome = ""
+                case .key("down"): studio = min(rows.count - 1, index + 1); previousChrome = ""
+                case .key("left"): if rows.indices.contains(index) { runStudio(rows[index].item, step: -1) }
+                case .key("right"): if rows.indices.contains(index) { runStudio(rows[index].item, step: 1) }
+                case .key("return"): if rows.indices.contains(index) { runStudio(rows[index].item, step: 0) }
+                case .key("escape"), .key("ctrl+a"): closeMenu()
+                case .key("ctrl+r"): perform(.record)
+                case .mouse: handleMouse(event)
+                default: break
+                }
+                continue
+            }
+            if let index = tools {
+                let count = toolList().count
+                switch event {
+                case .key("up"): tools = max(0, index - 1); previousChrome = ""
+                case .key("down"): tools = min(count - 1, index + 1); previousChrome = ""
+                case .key("return"): if toolList().indices.contains(index) { runTool(toolList()[index].tool) }
+                case .key("escape"), .key("ctrl+t"): closeMenu()
+                case .key("ctrl+o"): closeMenu(); openLogs()
+                case .mouse: handleMouse(event)
+                default: break
+                }
+                continue
+            }
+            // The frame picker previews as you move through it.
+            if let open = picker {
+                let all = FrameFinish.allCases
+                switch event {
+                case .key("up"): previewFrame(all[max(0, open.index - 1)])
+                case .key("down"): previewFrame(all[min(all.count - 1, open.index + 1)])
+                case .key("return"), .key("ctrl+f"): closeFramePicker(keep: true)
+                case .key("escape"): closeFramePicker(keep: false)
+                case .mouse: handleMouse(event)
+                default: break
+                }
+                continue
+            }
             if case .text(let value) = event { if !readOnly { text += value }; continue }
             flush()
             switch event {
@@ -719,7 +910,10 @@ final class PhoneViewer {
                 case "ctrl+r": perform(.record)
                 case "ctrl+b": perform(.home)
                 case "ctrl+l": perform(.lock)
-                case "ctrl+f": cycleFrame()
+                case "ctrl+f": perform(.frames)
+                case "ctrl+t": perform(.tools)
+                case "ctrl+o": perform(.logs)
+                case "ctrl+a": perform(.appStore)
                 default:
                     if let code = ["return": 40, "escape": 41, "backspace": 42, "tab": 43, "delete": 76, "right": 79, "left": 80, "down": 81, "up": 82][key] { enqueue("key", [String(code)], label: "key \(key)") }
                 }
@@ -735,7 +929,8 @@ final class PhoneViewer {
         // Chrome buttons act on press; their release is swallowed.
         if !wheel, !motion, !released, button & 3 == 0 {
             if let hit = hits.first(where: { $0.row == row && $0.columns.contains(col) }) { pressedChrome = true; perform(hit.action); return }
-            if menu != nil { closeMenu(); pressedChrome = true; return }
+            if picker != nil { closeFramePicker(keep: true); pressedChrome = true; return }
+            if menu != nil || tools != nil || studio != nil { closeMenu(); pressedChrome = true; return }
         }
         if pressedChrome { if released { pressedChrome = false }; return }
         let viewport = layout.viewport
@@ -770,5 +965,337 @@ final class PhoneViewer {
         let start = max(1, min(height - 2, wheelPoint.1 - sign * distance / 2))
         let end = max(1, min(height - 2, start + sign * distance))
         enqueue("swipe", [String(wheelPoint.0), String(start), String(wheelPoint.0), String(end)], label: "scroll \(sign > 0 ? "↑" : "↓")", duration: 0.16, wheel: true); wheelSteps = 0
+    }
+}
+
+// MARK: Tools panel
+
+/// Simulator controls (and the few a real iPhone allows), one click or Return each.
+extension PhoneViewer {
+    fileprivate enum Tool: Equatable { case statusBar, dark, deviceDark, deviceLight, textLarger, textSmaller, location, push, grant, resetPermissions, logs }
+    fileprivate struct ToolRow { let tool: Tool; let name: String; let detail: String; let enabled: Bool }
+    fileprivate static let places: [(name: String, coordinate: String)] = [
+        ("Cupertino", "37.3349,-122.0090"), ("New York", "40.7580,-73.9855"), ("London", "51.5072,-0.1276"),
+        ("Tokyo", "35.6595,139.7005"), ("Bengaluru", "12.9716,77.5946")]
+
+    /// The app `terminal-phone run` last launched on this phone.
+    fileprivate var lastApp: String? {
+        guard let directory = try? cli.store.directory(phone.name),
+              let text = try? String(contentsOf: directory.appendingPathComponent("last-app"), encoding: .utf8) else { return nil }
+        let bundle = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return bundle.isEmpty ? nil : bundle
+    }
+
+    fileprivate func toolList() -> [ToolRow] {
+        if phone.isDevice {
+            let canChange = phone.acceptsInput && !viewOnly
+            return [ToolRow(tool: .deviceDark, name: "Dark appearance", detail: canChange ? "" : "needs control", enabled: canChange),
+                    ToolRow(tool: .deviceLight, name: "Light appearance", detail: canChange ? "" : "needs control", enabled: canChange),
+                    ToolRow(tool: .logs, name: "Show app logs", detail: "relaunches the app", enabled: canChange)]
+        }
+        let canChange = !viewOnly, app = lastApp
+        let place = locationIndex.map { Self.places[$0].name } ?? "not set"
+        return [
+            ToolRow(tool: .statusBar, name: "Clean status bar", detail: statusBarClean == nil ? "…" : statusBarClean! ? "on · 9:41" : "off", enabled: canChange),
+            ToolRow(tool: .dark, name: "Dark mode", detail: dark == nil ? "…" : dark! ? "on" : "off", enabled: canChange && dark != nil),
+            ToolRow(tool: .textLarger, name: "Larger text", detail: textSize ?? "…", enabled: canChange),
+            ToolRow(tool: .textSmaller, name: "Smaller text", detail: textSize ?? "…", enabled: canChange),
+            ToolRow(tool: .location, name: "Location", detail: place, enabled: canChange),
+            ToolRow(tool: .push, name: "Test notification", detail: app ?? "run an app first", enabled: canChange && app != nil),
+            ToolRow(tool: .grant, name: "Allow all permissions", detail: app ?? "run an app first", enabled: canChange && app != nil),
+            ToolRow(tool: .resetPermissions, name: "Reset permissions", detail: app ?? "run an app first", enabled: canChange && app != nil),
+            ToolRow(tool: .logs, name: "Show logs", detail: app ?? "all processes", enabled: true),
+        ]
+    }
+
+    fileprivate func openTools() {
+        if menu != nil || picker != nil || studio != nil { closeMenu() }
+        tools = 0; previousChrome = ""
+        guard !phone.isDevice else { return }
+        let udid = phone.udid
+        refreshAppearance()
+        Task { @MainActor in
+            let overrides = (try? await cli.simctl(["status_bar", udid, "list"], timeout: 10)).map { String(decoding: $0, as: UTF8.self) }
+            let size = (try? await cli.simctl(["ui", udid, "content_size"], timeout: 10)).map { String(decoding: $0, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) }
+            guard udid == phone.udid else { return }
+            statusBarClean = overrides.map { $0.contains("9:41") }; textSize = size; previousChrome = ""
+        }
+    }
+
+    fileprivate func runTool(_ tool: Tool) {
+        guard let row = toolList().first(where: { $0.tool == tool }) else { return }
+        guard row.enabled else {
+            record(viewOnly ? "View only — select Enable control first" : "\(row.name): \(row.detail)", ok: false); return
+        }
+        if tool == .logs { closeMenu(); openLogs(); return }
+        if tool == .dark { toggleAppearance(); return }
+        guard !toolBusy else { return }
+        toolBusy = true
+        let udid = phone.udid, saved = phone, app = lastApp
+        Task { @MainActor in
+            defer { toolBusy = false; previousChrome = "" }
+            do {
+                switch tool {
+                case .statusBar:
+                    let clean = !(statusBarClean ?? false)
+                    if clean {
+                        _ = try await cli.simctl(["status_bar", udid, "override", "--time", "9:41", "--dataNetwork", "wifi", "--wifiMode", "active", "--wifiBars", "3",
+                                                  "--cellularMode", "active", "--cellularBars", "4", "--operatorName", "", "--batteryState", "charged", "--batteryLevel", "100"])
+                    } else { _ = try await cli.simctl(["status_bar", udid, "clear"]) }
+                    statusBarClean = clean; record(clean ? "Status bar: 9:41, full battery" : "Status bar restored", ok: true)
+                case .textLarger, .textSmaller:
+                    _ = try await cli.simctl(["ui", udid, "content_size", tool == .textLarger ? "increment" : "decrement"])
+                    textSize = String(decoding: try await cli.simctl(["ui", udid, "content_size"]), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+                    record("Text size: \(textSize ?? "")", ok: true)
+                case .location:
+                    // Each press moves on to the next place; after the last, the location is cleared.
+                    let next = locationIndex.map { $0 + 1 } ?? 0
+                    if next < Self.places.count {
+                        _ = try await cli.simctl(["location", udid, "set", Self.places[next].coordinate])
+                        locationIndex = next; record("Location: \(Self.places[next].name)", ok: true)
+                    } else {
+                        _ = try await cli.simctl(["location", udid, "clear"]); locationIndex = nil; record("Location cleared", ok: true)
+                    }
+                case .push:
+                    guard let app else { return }
+                    let file = FileManager.default.temporaryDirectory.appendingPathComponent("terminal-phone-push-\(UUID().uuidString).json")
+                    defer { try? FileManager.default.removeItem(at: file) }
+                    try JSONSerialization.data(withJSONObject: ["aps": ["alert": ["title": "terminal-phone", "body": "Test notification"], "sound": "default"]]).write(to: file)
+                    _ = try await cli.simctl(["push", udid, app, file.path])
+                    record("Notification sent to \(app)", ok: true)
+                case .grant, .resetPermissions:
+                    guard let app else { return }
+                    _ = try await cli.simctl(["privacy", udid, tool == .grant ? "grant" : "reset", "all", app])
+                    record(tool == .grant ? "\(app) may use everything" : "\(app) will ask for permissions again", ok: true)
+                case .deviceDark, .deviceLight:
+                    try await PhoneDevices.connect(cli, saved, progress: false).appearance(dark: tool == .deviceDark)
+                    record(tool == .deviceDark ? "Dark appearance" : "Light appearance", ok: true)
+                case .dark, .logs: break
+                }
+            } catch { record("\(row.name): \(error.localizedDescription)", ok: false) }
+        }
+    }
+
+    /// Opens or closes the logs panel. It streams the app `terminal-phone run` last launched (or, on a
+    /// real iPhone, the app on screen), and every process on a simulator with no app yet.
+    fileprivate func openLogs() {
+        if logTail != nil { closeLogs(); return }
+        let saved = phone
+        if saved.isDevice, !(saved.acceptsInput && !viewOnly) {
+            record("Logs on a real iPhone relaunch the app, which needs control", ok: false); return
+        }
+        var bundle = lastApp
+        Task { @MainActor in
+            if saved.isDevice && bundle == nil {
+                // Otherwise the app on screen, unless that's the Home Screen.
+                let info = try? await PhoneDevices.connect(cli, saved, progress: false).call("GET", "/wda/activeAppInfo") as? [String: Any]
+                bundle = (info?["bundleId"] as? String).flatMap { $0 == "com.apple.springboard" ? nil : $0 }
+                guard bundle != nil else { record("Open an app on the iPhone first, then choose Logs", ok: false); return }
+            }
+            guard saved.name == phone.name, logTail == nil else { return }
+            do {
+                logTail = try PhoneLogTail(executable: cli.xcrun, arguments: await cli.logStreamArguments(saved, bundle: bundle))
+                logTitle = bundle ?? "all processes"
+                if saved.isDevice { record("Relaunched \(bundle!) to show its output", ok: true) }
+                relayout(clear: true)
+            } catch { record("Logs: \(error.localizedDescription)", ok: false) }
+        }
+    }
+    fileprivate func closeLogs() {
+        logTail?.stop(); logTail = nil
+        relayout(clear: true)
+    }
+
+    fileprivate func drawLogs(_ panel: CellRect) -> String {
+        guard panel.columns >= 12, panel.rows >= 3 else { return "" }
+        let snapshot = logTail?.snapshot ?? (lines: [], version: 0, ended: nil)
+        let width = panel.columns, inner = width - 4
+        var output = ""
+        let close = " ⌃O close "
+        let title = [Span("╭─ ", Theme.border), Span("Logs", Theme.bold + Theme.accent), Span(" · " + logTitle + " ", Theme.muted)].truncated(width - close.count - 2)
+        output += Box.line(column: panel.column, row: panel.row, width: width,
+                           title + [Span(String(repeating: "─", count: max(0, width - title.width - close.count - 1)), Theme.border), Span(close, Theme.faint), Span("╮", Theme.border)])
+        hits.insert(Hit(row: panel.row, columns: panel.column...(panel.column + width - 1), action: .logs), at: 0)
+        let room = panel.rows - 2
+        var lines: [[Span]] = snapshot.lines.suffix(room).map { line in
+            let style = line.level.map { "EF".contains($0) ? Theme.red : "D".contains($0) ? Theme.faint : Theme.text } ?? Theme.text
+            return (line.time.isEmpty ? [] : [Span(String(line.time.suffix(12)) + " ", Theme.faint)]) + [Span(line.text, style)]
+        }
+        if lines.isEmpty { lines = [[Span(snapshot.ended.map { $0.isEmpty ? "Stopped" : $0 } ?? "Waiting for log messages…", Theme.faint)]] }
+        for offset in 0..<room {
+            let content = offset < lines.count ? lines[offset].truncated(inner) : []
+            output += Box.line(column: panel.column, row: panel.row + 1 + offset, width: width,
+                               [Span("│ ", Theme.border)] + content + [Span(String(repeating: " ", count: max(0, inner - content.width)) + " │", Theme.border)])
+        }
+        output += Box.line(column: panel.column, row: panel.row + panel.rows - 1, width: width, [Span("╰" + String(repeating: "─", count: max(0, width - 2)) + "╯", Theme.border)])
+        return output
+    }
+
+    fileprivate func drawTools() -> String {
+        guard let selectedIndex = tools else { return "" }
+        let help = [Span("↑↓", Theme.cyan), Span(" choose ", Theme.faint), Span("⏎", Theme.cyan), Span(" apply ", Theme.faint), Span("esc", Theme.cyan), Span(" close", Theme.faint)]
+        return drawPanel(title: phone.isDevice ? "iPhone tools" : "Simulator tools", width: 46, selected: selectedIndex,
+                         rows: toolList().map { ([Span($0.name, $0.enabled ? Theme.text : Theme.faint)], [Span($0.detail, $0.enabled ? Theme.muted : Theme.faint)], $0.enabled, .tool($0.tool)) },
+                         help: help)
+    }
+}
+
+// MARK: App Store panel
+
+/// App Store screenshots and app previews from the viewer: the size, frame, background and
+/// caption are chosen here (and remembered), and every file lands on the Desktop.
+extension PhoneViewer {
+    fileprivate enum StudioItem: Equatable { case screenshot, record, size, frame, background, caption, statusBar, reveal }
+    fileprivate struct StudioRow { let item: StudioItem; let name: String; let detail: [Span]; let enabled: Bool }
+
+    private var nativeSize: PixelSize { PixelSize(screen.nativeWidth, screen.nativeHeight) }
+
+    fileprivate func studioRows() -> [StudioRow] {
+        let s = studioSettings, auto = AppStoreDisplay.auto(for: nativeSize)
+        let display = s.chosenDisplay ?? auto
+        let shot = display.screenshotSize(for: nativeSize), preview = display.previewSize(landscape: nativeSize.landscape)
+        func choice(_ text: String, _ style: String = Theme.text) -> [Span] { [Span("‹ ", Theme.faint), Span(text, style), Span(" ›", Theme.faint)] }
+        let ours = recordingStyle != nil, someoneElses = recording != nil && !ours
+        var rows = [
+            StudioRow(item: .screenshot, name: "Take screenshot", detail: [Span("\(shot.width)×\(shot.height) PNG", Theme.muted)], enabled: true),
+            StudioRow(item: .record, name: ours ? "Stop and save preview" : "Record app preview",
+                      detail: ours ? [Span(recordingTime, Theme.red)] : someoneElses ? [Span("stop the other recording", Theme.faint)]
+                                   : [Span("\(preview.width)×\(preview.height) · 15–30 s", Theme.muted)],
+                      enabled: !someoneElses && mediaTask == nil),
+            StudioRow(item: .size, name: "Size", detail: choice(s.chosenDisplay == nil ? "Auto · \(auto.rawValue)\"" : display.isPad ? "iPad \(display.rawValue.dropFirst(5))\"" : "\(display.rawValue)\""), enabled: true),
+            StudioRow(item: .frame, name: "Device frame", detail: s.frame ? choice(finish.displayName) : [Span("Off", Theme.muted)], enabled: true),
+            StudioRow(item: .background, name: "Background",
+                      detail: choice(s.background.map { $0.prefix(1).uppercased() + $0.dropFirst() } ?? (s.frame || s.caption != nil ? "Light (auto)" : "None")), enabled: true),
+            StudioRow(item: .caption, name: "Caption",
+                      detail: captionDraft.map { [Span($0, Theme.text), Span("▏", Theme.accent)] } ?? [Span(s.caption ?? "None · ⏎ to type", s.caption == nil ? Theme.faint : Theme.text)],
+                      enabled: true),
+        ]
+        if !phone.isDevice {
+            rows.append(StudioRow(item: .statusBar, name: "Clean status bar", detail: [Span(statusBarClean == nil ? "…" : statusBarClean! ? "On · 9:41" : "Off", Theme.muted)], enabled: !viewOnly))
+        }
+        rows.append(StudioRow(item: .reveal, name: "Show in Finder", detail: [Span(lastMedia?.lastPathComponent ?? "nothing saved yet", Theme.faint)], enabled: lastMedia != nil))
+        return rows
+    }
+    private var recordingTime: String {
+        let seconds = Int(Date().timeIntervalSince(recording?.started ?? Date()))
+        return String(format: "%d:%02d", seconds / 60, seconds % 60) + (seconds < 15 ? " · keep going" : seconds > 30 ? " · trims to 30 s" : " · good length")
+    }
+
+    fileprivate func openStudio() {
+        if menu != nil || picker != nil || tools != nil { closeMenu() }
+        studio = 0; previousChrome = ""
+        loadStatusBar()
+    }
+    private func loadStatusBar() {
+        guard !phone.isDevice else { return }
+        let udid = phone.udid
+        Task { @MainActor in
+            let overrides = (try? await cli.simctl(["status_bar", udid, "list"], timeout: 10)).map { String(decoding: $0, as: UTF8.self) }
+            guard udid == phone.udid else { return }
+            statusBarClean = overrides.map { $0.contains("9:41") }; previousChrome = ""
+        }
+    }
+    private func saveStudio() {
+        guard var config = try? PhoneConfiguration.load(store: cli.store) else { return }
+        config.appStore = studioSettings; try? config.save(store: cli.store)
+    }
+
+    /// `step` is −1 or +1 for ← and →, and 0 for Return or a click.
+    fileprivate func runStudio(_ item: StudioItem, step: Int) {
+        guard let row = studioRows().first(where: { $0.item == item }) else { return }
+        previousChrome = ""
+        switch item {
+        case .screenshot: if step == 0 { appStoreScreenshot() }
+        case .record:
+            guard step == 0 else { return }
+            guard row.enabled else { record("Stop the current recording first", ok: false); return }
+            recordingStyle != nil ? stopRecording(wait: false) : startRecording(appStore: true)
+        case .size:
+            studioSettings.display = AppStoreSettings.step(AppStoreSettings.displays, from: studioSettings.display, by: step == 0 ? 1 : step); saveStudio()
+        case .frame:
+            if step == 0 || !studioSettings.frame { studioSettings.frame.toggle() }
+            else {
+                // ← → try finishes on the live phone too, and the choice is saved for this phone.
+                finish = AppStoreSettings.step(FrameFinish.allCases, from: finish, by: step)
+                Self.saveFrame(finish, for: phone.name, store: cli.store); relayout()
+            }
+            saveStudio()
+        case .background:
+            studioSettings.background = AppStoreSettings.step(AppStoreSettings.backgrounds, from: studioSettings.background, by: step == 0 ? 1 : step); saveStudio()
+        case .caption:
+            if step == 0 { captionDraft = studioSettings.caption ?? "" }
+        case .statusBar:
+            guard step == 0 else { return }
+            guard row.enabled else { record("View only — select Enable control first", ok: false); return }
+            runTool(.statusBar)
+        case .reveal:
+            if step == 0, let lastMedia { NSWorkspace.shared.activateFileViewerSelecting([lastMedia]) }
+        }
+    }
+    private func commitCaption() {
+        let text = (captionDraft ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        studioSettings.caption = text.isEmpty ? nil : text; captionDraft = nil; previousChrome = ""
+        saveStudio()
+    }
+
+    private func appStoreScreenshot() {
+        let name = phone.name, style = studioSettings.style(finish: finish)
+        record("Taking the App Store screenshot…", ok: true)
+        Task { @MainActor in
+            do {
+                let (image, scale) = try await cli.nativeScreenshot(name)
+                let (_, saved) = try cli.writeScreenshot(image, scale: scale, style: style, to: { self.outputURL("App Store \($0.rawValue)", "png") })
+                lastMedia = saved.url; previousChrome = ""
+                record("Saved \(saved.url.lastPathComponent) · \(saved.canvas.width)×\(saved.canvas.height)", ok: true)
+            } catch { record("Screenshot failed: \(error.localizedDescription)", ok: false) }
+        }
+    }
+
+    fileprivate func drawStudio() -> String {
+        guard let selectedIndex = studio else { return "" }
+        let rows = studioRows()
+        let help: [Span] = captionDraft != nil
+            ? [Span("type", Theme.cyan), Span(" caption ", Theme.faint), Span("⏎", Theme.cyan), Span(" save ", Theme.faint), Span("esc", Theme.cyan), Span(" cancel", Theme.faint)]
+            : [Span("↑↓", Theme.cyan), Span(" choose ", Theme.faint), Span("←→", Theme.cyan), Span(" change ", Theme.faint), Span("⏎", Theme.cyan), Span(" go ", Theme.faint), Span("esc", Theme.cyan), Span(" close", Theme.faint)]
+        return drawPanel(title: "App Store", width: 50, selected: selectedIndex,
+                         rows: rows.map { row in
+                             let primary = row.item == .screenshot || row.item == .record
+                             return ([Span(row.name, !row.enabled ? Theme.faint : primary ? Theme.bold + Theme.text : Theme.text)], row.detail, row.enabled, .studio(row.item))
+                         }, help: help, footer: [Span("Files go to the Desktop", Theme.faint)])
+    }
+
+    /// A bordered list panel at the top left. Every cell has a background so it covers the phone.
+    private func drawPanel(title: String, width preferred: Int, selected: Int, rows: [(left: [Span], right: [Span], enabled: Bool, action: Action)],
+                               help: [Span], footer: [Span] = []) -> String {
+        guard let layout, !rows.isEmpty else { return "" }
+        let surface = Theme.surface, highlight = Theme.selected
+        let width = min(layout.columns - 2, preferred)
+        let top = layout.roomy ? 4 : 2, extra = footer.isEmpty ? 0 : 1
+        let visible = max(1, min(rows.count, layout.rows - top - 3 - extra))
+        let first = min(max(0, selected - visible + 1), rows.count - visible)
+        let column = 2
+        var output = ""
+        func paint(_ row: Int, _ spans: [Span], background: String) {
+            let fitted = spans.truncated(width)
+            output += "\u{1b}[\(row);\(column)H" + fitted.map { Span($0.text, background + $0.style) }.rendered +
+                [Span(String(repeating: " ", count: max(0, width - fitted.width)), background)].rendered
+        }
+        func line(_ content: [Span]) -> [Span] {
+            let inner = content.truncated(width - 4)
+            return [Span("│ ", Theme.border)] + inner + [Span(String(repeating: " ", count: max(0, width - 3 - inner.width))), Span("│", Theme.border)]
+        }
+        paint(top, [Span("╭─ ", Theme.border), Span(title, Theme.bold + Theme.accent), Span(" " + String(repeating: "─", count: max(0, width - title.count - 5)) + "╮", Theme.border)], background: surface)
+        for (offset, item) in rows[first..<(first + visible)].enumerated() {
+            let index = first + offset, row = top + 1 + offset
+            let right = item.right.truncated(max(0, width - item.left.width - 6))
+            let gap = max(1, width - 4 - item.left.width - right.width)
+            paint(row, line(item.left + [Span(String(repeating: " ", count: gap))] + right), background: index == selected ? highlight : surface)
+            hits.insert(Hit(row: row, columns: column...(column + width - 1), action: item.action), at: 0)
+        }
+        if !footer.isEmpty { paint(top + visible + 1, line(footer), background: surface) }
+        paint(top + visible + 1 + extra, line(help), background: surface)
+        paint(top + visible + 2 + extra, [Span("╰" + String(repeating: "─", count: max(0, width - 2)) + "╯", Theme.border)], background: surface)
+        menuArea = (column, top, width, visible + 3 + extra)
+        return output
     }
 }

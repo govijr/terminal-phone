@@ -22,14 +22,43 @@ final class DeviceLiveSession: PhoneLink {
     private var agent: WebDriverAgent?
     private var reader: MJPEGReader?
     private var stopped = false
-    private var reconnects = 0
+    private var reconnects = 0, recovering = false
+    private var monitor: Task<Void, Never>?
+    /// Whether WebDriverAgent last reported the iPhone as locked.
+    private(set) var locked = false
     private var stream: (cli: PhoneCLI, phone: Phone, scale: Double, frames: @Sendable (Data) -> Void)?
 
+    /// WDA encodes on the phone: half resolution at quality 70 holds 25-30 fps over Wi-Fi.
+    static let maxScale = 0.5
+
     func start(cli: PhoneCLI, phone: Phone, streamScale: Double, frames: @escaping @Sendable (Data) -> Void) async throws {
-        // WDA encodes on the phone: half resolution at quality 70 holds 25-30 fps over Wi-Fi.
-        stream = (cli, phone, min(streamScale, 0.5), frames)
+        stream = (cli, phone, min(streamScale, Self.maxScale), frames)
         try await openStream()
         onEvent?(["event": "ready"])
+        watchLock()
+    }
+    /// iOS stops capture and input while the iPhone is locked. Report it, so the viewer can
+    /// say so instead of looking frozen, and resume by itself after the owner unlocks.
+    private func watchLock() {
+        monitor?.cancel()
+        monitor = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self, !self.stopped else { return }
+                if let agent = self.agent, let value = try? await agent.call("GET", "/wda/locked", timeout: 3) as? Bool, value != self.locked {
+                    self.locked = value
+                    self.onEvent?(["event": value ? "locked" : "unlocked"])
+                }
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+            }
+        }
+    }
+    /// A new size only needs new settings and a new video connection; input keeps its client and session.
+    func rescale(_ scale: Double) async throws {
+        guard var stream, let agent, !stopped else { return }
+        stream.scale = min(scale, Self.maxScale); self.stream = stream
+        try await agent.configureStream(scale: stream.scale, quality: 70)
+        guard !stopped else { return }
+        openReader(agent)
     }
     private func openStream() async throws {
         guard let stream, !stopped else { return }
@@ -37,6 +66,10 @@ final class DeviceLiveSession: PhoneLink {
         guard !stopped else { return }
         self.agent = agent
         try await agent.configureStream(scale: stream.scale, quality: 70)
+        openReader(agent)
+    }
+    private func openReader(_ agent: WebDriverAgent) {
+        guard let stream else { return }
         reader?.cancel()
         reader = MJPEGReader(url: WebDriverAgent.url(host: agent.host, port: WebDriverAgent.mjpegPort), onFrame: { [weak self] frame in
             stream.frames(frame)
@@ -45,13 +78,29 @@ final class DeviceLiveSession: PhoneLink {
             Task { @MainActor [weak self] in await self?.streamEnded(message) }
         })
     }
-    /// CoreDevice recreates idle tunnels with new addresses; reconnect instead of giving up.
+    /// CoreDevice recreates idle tunnels with new addresses, and a locked or sleeping iPhone drops
+    /// off Wi-Fi. Retry quickly twice, then keep waiting for the phone instead of giving up.
     private func streamEnded(_ message: String) async {
-        guard !stopped else { return }
-        reconnects += 1
-        guard reconnects <= 5 else { onFailure?("iPhone stream ended: \(message)"); return }
-        try? await Task.sleep(nanoseconds: UInt64(reconnects) * 700_000_000)
-        do { try await openStream() } catch { await streamEnded(error.localizedDescription) }
+        guard !stopped, !recovering else { return }
+        recovering = true
+        defer { recovering = false }
+        var message = message, waiting = false
+        while !stopped {
+            reconnects += 1
+            // The tunnel may have a new address now, so look the device up again.
+            if let phone = stream?.phone { PhoneDevices.forget(phone) }
+            if reconnects == 3 {
+                waiting = true
+                onEvent?(["event": "waiting", "message": "\(stream?.phone.displayModel ?? "iPhone") is locked or out of reach. Unlock it to continue.", "detail": message])
+            }
+            try? await Task.sleep(nanoseconds: reconnects <= 2 ? UInt64(reconnects) * 400_000_000 : 2_000_000_000)
+            guard !stopped else { return }
+            do {
+                try await openStream()
+                if waiting { onEvent?(["event": "ready"]) }
+                return
+            } catch { message = error.localizedDescription }
+        }
     }
     func send(_ request: [String: Any]) throws {
         guard let agent else { throw Failure("The iPhone is not connected yet") }
@@ -83,6 +132,7 @@ final class DeviceLiveSession: PhoneLink {
     }
     func stop() {
         stopped = true
+        monitor?.cancel(); monitor = nil
         reader?.cancel(); reader = nil
     }
     var client: WebDriverAgent? { agent }

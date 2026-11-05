@@ -13,7 +13,7 @@ enum PhoneDevices {
     }
 
     static func list(_ cli: PhoneCLI) async throws -> [ConnectedDevice] {
-        let output = FileManager.default.temporaryDirectory.appendingPathComponent("terminal-phone-devices-\(getpid()).json")
+        let output = FileManager.default.temporaryDirectory.appendingPathComponent("terminal-phone-devices-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: output) }
         _ = try await CommandRunner.checked(cli.xcrun, ["devicectl", "list", "devices", "--quiet", "--json-output", output.path], timeout: 30)
         return try ConnectedDevice.parse(Data(contentsOf: output)).filter(\.isIPhone)
@@ -30,7 +30,7 @@ enum PhoneDevices {
         var device = try await find(cli, phone)
         if !device.reachable, device.pairing == "paired" {
             // CoreDevice opens its USB/Wi-Fi tunnel on demand; asking for device details opens it.
-            let details = FileManager.default.temporaryDirectory.appendingPathComponent("terminal-phone-device-\(getpid()).json")
+            let details = FileManager.default.temporaryDirectory.appendingPathComponent("terminal-phone-device-\(UUID().uuidString).json")
             defer { try? FileManager.default.removeItem(at: details) }
             _ = try? await CommandRunner.run(cli.xcrun, ["devicectl", "device", "info", "details", "--device", phone.udid, "--quiet", "--json-output", details.path], timeout: 30)
             device = try await find(cli, phone)

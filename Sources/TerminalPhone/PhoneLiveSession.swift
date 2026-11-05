@@ -16,11 +16,11 @@ final class PhoneLiveSession {
         guard let idb = cli.idb else { throw Failure("Install idb to use the live viewer") }
         let bin = URL(fileURLWithPath: idb).resolvingSymlinksInPath().deletingLastPathComponent()
         guard let python = ["python3", "python"].map({ bin.appendingPathComponent($0).path }).first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
-            throw Failure("Cannot locate idb's Python runtime. Run scripts/setup-phone-automation.sh")
+            throw Failure("Cannot locate the phone-control Python runtime. Run terminal-phone setup.")
         }
         let executable = Bundle.main.executableURL!.resolvingSymlinksInPath()
         let worker = executable.deletingLastPathComponent().appendingPathComponent("resources/phone-viewer-worker.py")
-        guard FileManager.default.fileExists(atPath: worker.path) else { throw Failure("Live viewer helper is missing. Rebuild with scripts/build-phone.sh") }
+        guard FileManager.default.fileExists(atPath: worker.path) else { throw Failure("The live viewer helper is missing. Reinstall the full terminal-phone package.") }
         let socket = try await PhoneCompanion.socketFor(phone, store: cli.store)
         let stdout = Pipe(), stdin = Pipe()
         let child = Process()

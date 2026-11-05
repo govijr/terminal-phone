@@ -81,7 +81,12 @@ extension PhoneCLI {
         let name = try named([args.positionals.first ?? registered ?? "iphone"])
         let existing = try? store.load(name)
         if let existing, existing.udid != selected.identifier { throw AgentError(.invalidRequest, "'\(name)' already belongs to another phone. Choose a different name.") }
-        var allowed = existing?.acceptsInput == true || args.flags.contains("allow-input")
+        guard !(args.flags.contains("view-only") && args.flags.contains("allow-input")) else {
+            throw AgentError(.invalidRequest, "Choose either --view-only or --allow-input.")
+        }
+        // --view-only is an explicit decision and withdraws an earlier grant.
+        var allowed = !args.flags.contains("view-only") && (existing?.acceptsInput == true || args.flags.contains("allow-input"))
+        if existing?.acceptsInput == true && !allowed { progress("Input withdrawn for \(name); it is now view-only.") }
         if !allowed && !args.flags.contains("view-only") && isatty(STDIN_FILENO) == 1 {
             progress("Allow terminal-phone and your connected agents to tap, type and navigate on \(selected.name)?")
             FileHandle.standardError.write(Data("Allow control? [y/N] ".utf8))

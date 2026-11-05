@@ -6,7 +6,7 @@ import TerminalPhoneCore
 @MainActor
 enum PhoneCompanion {
     static func socketFor(_ phone: Phone, store: PhoneStore) async throws -> String {
-        guard let executable = CommandRunner.executable("idb_companion") else { throw Failure("idb_companion is missing; run scripts/setup-phone-automation.sh") }
+        guard let executable = CommandRunner.executable("idb_companion") else { throw Failure("idb_companion is missing. Run terminal-phone setup.") }
         let root = URL(fileURLWithPath: "/tmp/terminal-phone-\(getuid())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let attributes = try FileManager.default.attributesOfItem(atPath: root.path)

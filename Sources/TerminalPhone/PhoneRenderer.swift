@@ -12,12 +12,25 @@ enum GraphicsTransport: String {
     /// PNG chunks through the pty, for kitty-protocol terminals without shared memory.
     case kittyDirect = "png"
     case iterm = "iterm"
+    /// Half-block text, for terminals without inline images.
+    case blocks = "blocks"
+}
+
+/// How escapes reach the terminal: directly, or through tmux.
+struct RenderTarget: Equatable {
+    /// Wrap image escapes in tmux passthrough.
+    var tmux = false
+    /// Kitty images as Unicode placeholder text, which tmux keeps on screen like any text.
+    var placeholders = false
+    var depth = ColorDepth.truecolor
 }
 
 struct FramePlacement: Equatable {
     let viewport: PhoneViewport
     /// Opaque fill for transports without alpha (iTerm2 JPEG). Kitty gets transparent corners.
     let background: UInt32?
+    /// Cells covered by a menu, which image text (blocks, placeholders) must not overwrite.
+    var mask: CellRect? = nil
 }
 
 /// Turns video frames into terminal graphics on a background queue. Only the newest frame is
@@ -33,17 +46,26 @@ final class PhoneRenderer: @unchecked Sendable {
     private var busy = false
     private var placement: FramePlacement?
     private var transport: GraphicsTransport
+    private var target: RenderTarget
     private var stats = Stats()
     // Only touched on `queue`.
     private var imageID = 0, sequence = 0
     private var drawn: (frame: Data, placement: FramePlacement)?
+    private var blocks: HalfBlocks?
 
-    init(writer: TerminalWriter, transport: GraphicsTransport) { self.writer = writer; self.transport = transport }
+    init(writer: TerminalWriter, transport: GraphicsTransport, target: RenderTarget = RenderTarget()) {
+        self.writer = writer; self.transport = transport; self.target = target
+    }
 
     var currentStats: Stats { lock.withLock { stats } }
     var currentTransport: GraphicsTransport { lock.withLock { transport } }
-    func configure(placement: FramePlacement?, transport: GraphicsTransport? = nil) {
-        lock.withLock { self.placement = placement; if let transport { self.transport = transport } }
+    var currentTarget: RenderTarget { lock.withLock { target } }
+    func configure(placement: FramePlacement?, transport: GraphicsTransport? = nil, target: RenderTarget? = nil) {
+        lock.withLock {
+            self.placement = placement
+            if let transport { self.transport = transport }
+            if let target { self.target = target }
+        }
     }
     /// Safe to call from any thread, including the video reader.
     func submit(_ frame: Data, force: Bool = false) {
@@ -61,18 +83,20 @@ final class PhoneRenderer: @unchecked Sendable {
     /// Removes both double-buffered images. Call before leaving the alternate screen.
     func clear() -> String {
         queue.sync {}
-        return currentTransport == .iterm ? "" : "\u{1b}_Ga=d,d=I,i=2,q=2;\u{1b}\\\u{1b}_Ga=d,d=I,i=3,q=2;\u{1b}\\"
+        guard [.kittySharedMemory, .kittyDirect].contains(currentTransport) else { return "" }
+        let delete = "\u{1b}_Ga=d,d=I,i=2,q=2;\u{1b}\\\u{1b}_Ga=d,d=I,i=3,q=2;\u{1b}\\"
+        return currentTarget.tmux ? TerminalProfile.tmuxPassthrough("\u{1b}_Ga=d,d=I,i=2,q=2;\u{1b}\\") + TerminalProfile.tmuxPassthrough("\u{1b}_Ga=d,d=I,i=3,q=2;\u{1b}\\") : delete
     }
 
     private func drain() {
         while true {
-            let next = lock.withLock { () -> (Data, FramePlacement?, GraphicsTransport, Bool)? in
+            let next = lock.withLock { () -> (Data, FramePlacement?, GraphicsTransport, RenderTarget, Bool)? in
                 guard let frame = pending else { busy = false; return nil }
                 pending = nil; if !frame.isEmpty { last = frame }
                 defer { force = false }
-                return (frame, placement, transport, force)
+                return (frame, placement, transport, target, force)
             }
-            guard let (frame, placement, transport, force) = next, let placement else { if next == nil { return } else { continue } }
+            guard let (frame, placement, transport, target, force) = next, let placement else { if next == nil { return } else { continue } }
             // The simulator streams continuously; identical frames cost nothing.
             if !force, let drawn, drawn.placement == placement, drawn.frame == frame { continue }
             autoreleasepool {
@@ -83,7 +107,7 @@ final class PhoneRenderer: @unchecked Sendable {
                           let decoded = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary) else { return }
                     image = decoded
                 }
-                guard let escape = encode(image, placement: placement, transport: transport) else { return }
+                guard let escape = encode(image, placement: placement, transport: transport, target: target, force: force) else { return }
                 writer.writeAndWait("\u{1b}[\(placement.viewport.row);\(placement.viewport.column)H" + escape)
                 drawn = (frame, placement)
                 guard let image else { return }
@@ -108,7 +132,15 @@ final class PhoneRenderer: @unchecked Sendable {
     private static func color(_ hex: UInt32, _ alpha: Double = 1) -> CGColor {
         CGColor(srgbRed: Double(hex >> 16 & 255) / 255, green: Double(hex >> 8 & 255) / 255, blue: Double(hex & 255) / 255, alpha: alpha)
     }
-    /// Draws the titanium body, bezel, side buttons and the rounded screen.
+    private static func mix(_ a: UInt32, _ b: UInt32, _ t: Double) -> UInt32 {
+        func channel(_ shift: UInt32) -> UInt32 {
+            let from = Double((a >> shift) & 255), to = Double((b >> shift) & 255)
+            let value: Double = from * (1 - t) + to * t
+            return UInt32(value.rounded()) << shift
+        }
+        return channel(16) | channel(8) | channel(0)
+    }
+    /// Draws the metal body, bezel, side buttons and the rounded screen.
     private func compose(_ image: CGImage?, placement: FramePlacement, into context: CGContext) {
         let v = placement.viewport, f = v.frame, s = v.scale, height = Double(v.canvasHeight)
         if let background = placement.background {
@@ -122,19 +154,26 @@ final class PhoneRenderer: @unchecked Sendable {
             let radius = min(radius * s, r.width / 2, r.height / 2)
             return CGPath(roundedRect: r, cornerWidth: radius, cornerHeight: radius, transform: nil)
         }
-        let button = DeviceFrame.button, rim = DeviceFrame.rim
+        let button = DeviceFrame.button, rim = DeviceFrame.rim, finish = f.finish
         // Side buttons: action, volume up, volume down on the left; side button on the right.
-        context.setFillColor(Self.color(0x3a3a40))
+        context.setFillColor(Self.color(finish.buttons))
         for (top, length) in [(0.165, 0.035), (0.225, 0.07), (0.31, 0.07)] {
             context.addPath(rounded(rect(0, f.height * top, button + rim + 1, f.height * length), 1.5))
         }
         context.addPath(rounded(rect(f.width - button - rim - 1, f.height * 0.255, button + rim + 1, f.height * 0.11), 1.5))
         context.fillPath()
-        // Titanium band with a fine highlight, then the black bezel.
+        // The metal band: a diagonal sheen, lighter where light falls from the top left, then a
+        // polished edge highlight. The black bezel and screen sit on top.
         let body = rect(button, 0, f.width - 2 * button, f.height)
-        context.addPath(rounded(body, f.screenRadius + f.inset)); context.setFillColor(Self.color(0x4a4a50)); context.fillPath()
+        context.saveGState()
+        context.addPath(rounded(body, f.screenRadius + f.inset)); context.clip()
+        let sheen = [Self.mix(finish.band, 0xffffff, 0.22), finish.band, Self.mix(finish.band, 0x000000, 0.12), Self.mix(finish.band, 0xffffff, 0.08), Self.mix(finish.band, 0x000000, 0.22)]
+        if let gradient = CGGradient(colorsSpace: colorSpace, colors: sheen.map { Self.color($0) } as CFArray, locations: [0, 0.35, 0.6, 0.78, 1]) {
+            context.drawLinearGradient(gradient, start: CGPoint(x: body.minX, y: body.maxY), end: CGPoint(x: body.maxX, y: body.minY), options: [])
+        } else { context.setFillColor(Self.color(finish.band)); context.fill(body) }
+        context.restoreGState()
         context.addPath(rounded(body.insetBy(dx: 0.6 * s, dy: 0.6 * s), f.screenRadius + f.inset - 0.6))
-        context.setStrokeColor(Self.color(0x8e8e96, 0.7)); context.setLineWidth(max(1, 0.8 * s)); context.strokePath()
+        context.setStrokeColor(Self.color(finish.highlight, 0.7)); context.setLineWidth(max(1, 0.8 * s)); context.strokePath()
         context.addPath(rounded(body.insetBy(dx: rim * s, dy: rim * s), f.screenRadius + DeviceFrame.bezel))
         context.setFillColor(Self.color(0x050506)); context.fillPath()
         // The screen itself.
@@ -145,13 +184,17 @@ final class PhoneRenderer: @unchecked Sendable {
         context.restoreGState()
     }
 
-    private func encode(_ image: CGImage?, placement: FramePlacement, transport: GraphicsTransport) -> String? {
+    private func encode(_ image: CGImage?, placement: FramePlacement, transport: GraphicsTransport, target: RenderTarget, force: Bool) -> String? {
         let v = placement.viewport
+        let wrap: (String) -> String = target.tmux ? TerminalProfile.tmuxPassthrough : { $0 }
         // The canvas covers whole cells exactly, so the terminal draws it 1:1. The phone sits
         // below cell backgrounds, so menus can draw over it and plain text stays readable on it.
-        let box = "c=\(v.columns),r=\(v.rows),z=-1073741825"
+        // In tmux the image is a virtual placement shown by placeholder text instead.
+        let placeholders = target.placeholders && transport != .iterm && transport != .blocks
+        let box = placeholders ? "U=1,c=\(v.columns),r=\(v.rows)" : "C=1,c=\(v.columns),r=\(v.rows),z=-1073741825"
         let next = imageID == 2 ? 3 : 2
-        let replace = imageID == 0 ? "" : "\u{1b}_Ga=d,d=I,i=\(imageID),q=2;\u{1b}\\"
+        let replace = imageID == 0 ? "" : wrap("\u{1b}_Ga=d,d=I,i=\(imageID),q=2;\u{1b}\\")
+        let cells = placeholders ? KittyPlaceholders.cells(imageID: next, column: v.column, row: v.row, columns: v.columns, rows: v.rows, mask: placement.mask) : ""
         switch transport {
         case .kittySharedMemory:
             sequence += 1
@@ -165,23 +208,46 @@ final class PhoneRenderer: @unchecked Sendable {
             compose(image, placement: placement, into: context)
             imageID = next
             // The terminal reads and unlinks the object.
-            return "\u{1b}_Ga=T,f=32,t=s,s=\(v.canvasWidth),v=\(v.canvasHeight),S=\(size),i=\(next),q=2,C=1,\(box);\(Data(name.utf8).base64EncodedString())\u{1b}\\" + replace
+            return wrap("\u{1b}_Ga=T,f=32,t=s,s=\(v.canvasWidth),v=\(v.canvasHeight),S=\(size),i=\(next),q=2,\(box);\(Data(name.utf8).base64EncodedString())\u{1b}\\") + cells + replace
         case .kittyDirect:
             guard let png = encoded(image, placement: placement, type: .png, quality: nil) else { return nil }
             let bytes = Array(png.base64EncodedString().utf8)
             var output = "", offset = 0
             while offset < bytes.count {
                 let end = min(offset + 4096, bytes.count)
-                let header = offset == 0 ? "a=T,f=100,i=\(next),q=2,C=1,\(box)," : ""
-                output += "\u{1b}_G\(header)m=\(end < bytes.count ? 1 : 0);\(String(decoding: bytes[offset..<end], as: UTF8.self))\u{1b}\\"
+                let header = offset == 0 ? "a=T,f=100,i=\(next),q=2,\(box)," : ""
+                output += wrap("\u{1b}_G\(header)m=\(end < bytes.count ? 1 : 0);\(String(decoding: bytes[offset..<end], as: UTF8.self))\u{1b}\\")
                 offset = end
             }
             imageID = next
-            return output + replace
+            return output + cells + replace
         case .iterm:
             guard let jpeg = encoded(image, placement: placement, type: .jpeg, quality: 0.92) else { return nil }
-            return "\u{1b}]1337;File=inline=1;width=\(v.columns);height=\(v.rows);preserveAspectRatio=0:\(jpeg.base64EncodedString())\u{7}"
+            return wrap("\u{1b}]1337;File=inline=1;width=\(v.columns);height=\(v.rows);preserveAspectRatio=0:\(jpeg.base64EncodedString())\u{7}")
+        case .blocks:
+            return encodeBlocks(image, placement: placement, depth: target.depth, force: force)
         }
+    }
+
+    /// Composes the phone at two pixels per cell and writes only the cells that changed.
+    private func encodeBlocks(_ image: CGImage?, placement: FramePlacement, depth: ColorDepth, force: Bool) -> String? {
+        let v = placement.viewport, width = v.columns, height = v.rows * 2
+        guard width > 0, height > 0 else { return nil }
+        if blocks?.columns != width || blocks?.rows != v.rows { blocks = HalfBlocks(columns: width, rows: v.rows) }
+        let bytesPerRow = width * 4
+        var buffer = [UInt8](repeating: 0, count: bytesPerRow * height)
+        let cells: [HalfBlocks.Cell]? = buffer.withUnsafeMutableBytes { raw in
+            guard let context = CGContext(data: raw.baseAddress, width: width, height: height, bitsPerComponent: 8, bytesPerRow: bytesPerRow, space: colorSpace,
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else { return nil }
+            context.interpolationQuality = .high
+            // Draw in the viewport's canvas units; cells are never square, so scale each axis.
+            context.scaleBy(x: Double(width) / Double(v.canvasWidth), y: Double(height) / Double(v.canvasHeight))
+            compose(image, placement: FramePlacement(viewport: v, background: nil), into: context)
+            context.flush()
+            return HalfBlocks.cells(rgba: UnsafeRawBufferPointer(raw), bytesPerRow: bytesPerRow, columns: width, rows: v.rows)
+        }
+        guard let cells else { return nil }
+        return blocks!.render(cells, column: v.column, row: v.row, depth: depth, mask: placement.mask, force: force)
     }
 
     private func encoded(_ image: CGImage?, placement: FramePlacement, type: UTType, quality: Double?) -> Data? {

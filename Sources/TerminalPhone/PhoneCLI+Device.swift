@@ -50,6 +50,15 @@ extension PhoneCLI {
             }
             try printJSON(report)
             if report["ok"] as? Bool != true { exit(1) }
+        case "revoke":
+            guard args.positionals.count == 2, args.flags.isEmpty, args.options.isEmpty else { throw AgentError(.invalidRequest, "Usage: terminal-phone device revoke NAME") }
+            let phone = try store.load(args.positionals[1])
+            guard phone.isDevice else { throw AgentError(.invalidRequest, "'\(phone.name)' is a simulator; simulators have no owner grant to revoke.") }
+            let wasAllowed = phone.acceptsInput
+            try store.save(phone.withInputAllowed(false))
+            // Every session request re-reads the grant, so running sessions become view-only immediately.
+            try printJSON(["ok": true, "name": phone.name, "inputAllowed": false, "wasAllowed": wasAllowed,
+                           "note": "WebDriverAgent may still be running for viewing. Run terminal-phone stop \(phone.name) to end it."])
         case "setup":
             guard args.positionals.count <= 2, args.flags.isEmpty else { throw Failure("Usage: terminal-phone device setup [NAME] --team TEAM_ID") }
             guard let team = args.options["team"] else { throw Failure("Pass your Apple Developer team ID: terminal-phone device setup --team ABCDE12345 (see Xcode → Settings → Accounts)") }
@@ -58,7 +67,7 @@ extension PhoneCLI {
             if let phone { _ = try await PhoneAgentClient.stop(cli: self, name: phone.name) }
             let prefix = args.options["bundle-prefix"] ?? "com.terminalphone.\(team.lowercased())"
             try printJSON(try await PhoneDevices.setup(self, phone: phone, team: team, bundlePrefix: prefix))
-        default: throw Failure("Usage: terminal-phone device list | device setup [NAME] --team TEAM_ID")
+        default: throw Failure("Usage: terminal-phone device list | device setup [NAME] --team TEAM_ID | device doctor NAME | device revoke NAME")
         }
     }
 

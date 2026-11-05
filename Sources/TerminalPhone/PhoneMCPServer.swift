@@ -90,7 +90,8 @@ final class PhoneMCPServer {
             var command = ["up", name, "--no-view"]
             if let model = args.model { command += ["--device", model] }
             if let runtime = args.runtime { command += ["--runtime", runtime] }
-            let data = try await CommandRunner.checked(Bundle.main.executableURL!.resolvingSymlinksInPath().path, command, timeout: 300)
+            // A first boot may download the iOS runtime (up to 2 h in PhoneSetup) before booting.
+            let data = try await CommandRunner.checked(Bundle.main.executableURL!.resolvingSymlinksInPath().path, command, timeout: 7800)
             return toolResult(try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:])
         }
         if tool == "phone_session", args.operation == "stop" {

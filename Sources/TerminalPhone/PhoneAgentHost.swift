@@ -84,9 +84,13 @@ enum PhoneAgentClient {
                 let logURL = try cli.store.directory(phone.name).appendingPathComponent("agent-session.log")
                 FileManager.default.createFile(atPath: logURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
                 let log = try FileHandle(forWritingTo: logURL); defer { try? log.close() }
+                let executable = Bundle.main.executableURL!.resolvingSymlinksInPath().path
+                // Record every binary that starts a host, so a later version (or another build) can
+                // still verify and stop it. Without this, an upgrade leaves an unstoppable old host.
+                try PhoneRuntimeRegistry.record([executable])
                 let child = Process()
                 child.executableURL = URL(fileURLWithPath: "/usr/bin/nohup")
-                child.arguments = [Bundle.main.executableURL!.resolvingSymlinksInPath().path, "_session-host", phone.name]
+                child.arguments = [executable, "_session-host", phone.name]
                 var environment = ProcessInfo.processInfo.environment
                 environment["TERMINAL_PHONE_HOME"] = cli.store.root.path
                 child.environment = environment

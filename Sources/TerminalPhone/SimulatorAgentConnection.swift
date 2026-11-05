@@ -17,13 +17,13 @@ final class SimulatorAgentConnection {
     private func start() async throws {
         if process?.isRunning == true { return }
         close()
-        guard let idb = cli.idb else { throw AgentError(.notReady, "Install idb using scripts/setup-phone-automation.sh.") }
+        guard let idb = cli.idb else { throw AgentError(.notReady, "Phone control is not set up. Run terminal-phone setup.") }
         let bin = URL(fileURLWithPath: idb).resolvingSymlinksInPath().deletingLastPathComponent()
         guard let python = ["python3", "python"].map({ bin.appendingPathComponent($0).path }).first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
-            throw AgentError(.notReady, "Cannot locate idb's Python runtime. Run scripts/setup-phone-automation.sh.")
+            throw AgentError(.notReady, "Cannot locate the phone-control Python runtime. Run terminal-phone setup.")
         }
         let worker = Bundle.main.executableURL!.resolvingSymlinksInPath().deletingLastPathComponent().appendingPathComponent("resources/phone-agent-worker.py")
-        guard FileManager.default.fileExists(atPath: worker.path) else { throw AgentError(.notReady, "The agent helper is missing. Run scripts/build-phone.sh.") }
+        guard FileManager.default.fileExists(atPath: worker.path) else { throw AgentError(.notReady, "The agent helper is missing. Reinstall the full terminal-phone package.") }
         let socket = try await PhoneCompanion.socketFor(phone, store: cli.store)
         let stdin = Pipe(), stdout = Pipe(), child = Process()
         child.executableURL = URL(fileURLWithPath: python)

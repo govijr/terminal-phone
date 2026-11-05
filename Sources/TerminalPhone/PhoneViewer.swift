@@ -5,11 +5,8 @@ import TerminalPhoneCore
 
 @MainActor
 final class PhoneViewer {
-    static var supportsCurrentTerminal: Bool {
-        let e = ProcessInfo.processInfo.environment
-        return isatty(0) == 1 && isatty(1) == 1 && e["TMUX"] == nil &&
-            (e["TERM_PROGRAM"] == "iTerm.app" || e["TERM_PROGRAM"] == "ghostty" || e["KITTY_WINDOW_ID"] != nil || e["TERM"]?.contains("kitty") == true)
-    }
+    /// Every interactive terminal works: inline images where the terminal has them, text blocks elsewhere.
+    static var supportsCurrentTerminal: Bool { isatty(0) == 1 && isatty(1) == 1 }
     private enum Link: Equatable { case connecting(String), live, polling }
     private enum Action: Equatable { case menu, select(String), zoomOut, zoomFit, zoomActual, zoomIn, home, lock, screenshot, record, appearance, control }
     private struct Hit { let row: Int; let columns: ClosedRange<Int>; let action: Action }
@@ -22,7 +19,13 @@ final class PhoneViewer {
     private struct Activity { let at: Date; let text: String; let ok: Bool; let milliseconds: Double? }
     private struct MenuItem { let name: String; let detail: String; let state: String }
 
-    let cli: PhoneCLI, graphics: String
+    let cli: PhoneCLI
+    /// `--protocol`, when given. Otherwise the terminal is detected and probed.
+    private let requestedGraphics: GraphicsMode?
+    private var profile = TerminalProfile.detect(ProcessInfo.processInfo.environment)
+    private var graphics: GraphicsMode { switch renderer.currentTransport { case .kittySharedMemory, .kittyDirect: .kitty; case .iterm: .iterm; case .blocks: .blocks } }
+    /// Images that are cell content rather than a layer: stale cells must be erased by hand.
+    private var imagesAreText: Bool { graphics != .kitty || renderer.currentTarget.placeholders }
     private var viewOnly: Bool
     /// Input needs idb for simulators, and an explicit opt-in for real iPhones.
     private var readOnly: Bool { viewOnly || !phone.acceptsInput || (!phone.isDevice && !cli.touchAvailable) }
@@ -50,26 +53,90 @@ final class PhoneViewer {
     private var menu: [MenuItem]?, menuIndex = 0, menuArea: (column: Int, row: Int, width: Int, height: Int)?
     private var recording: (process: Process, url: URL, started: Date)?
     private var dark: Bool?
+    /// The phone's frame colour. Ctrl+F cycles it; the choice is saved per phone.
+    private var finish: FrameFinish
 
     init(cli: PhoneCLI, phone: Phone, screen: PhoneScreen, graphics: String?, readOnly: Bool, cellSize: String? = nil) throws {
         self.cli = cli; self.phone = phone; self.screen = screen; self.viewOnly = readOnly
+        finish = Self.savedFrame(for: phone.name, store: cli.store)
         let e = ProcessInfo.processInfo.environment
-        let detected = e["TERM_PROGRAM"] == "iTerm.app" ? "iterm" :
-            (e["KITTY_WINDOW_ID"] != nil || e["TERM"]?.contains("kitty") == true || e["TERM_PROGRAM"] == "ghostty") ? "kitty" : nil
-        guard let selected = graphics ?? detected, ["kitty", "iterm"].contains(selected) else { throw Failure("Inline view needs Ghostty, Kitty or iTerm2, or --protocol kitty|iterm") }
-        guard isatty(0) == 1, isatty(1) == 1 else { throw Failure("view needs an interactive terminal") }
-        guard e["TMUX"] == nil else { throw Failure("Run view outside tmux; graphics passthrough is not implemented") }
+        if let graphics, GraphicsMode(rawValue: graphics) == nil { throw Failure("--protocol must be kitty, iterm or blocks") }
+        requestedGraphics = graphics.flatMap(GraphicsMode.init(rawValue:))
+        guard isatty(0) == 1, isatty(1) == 1 else {
+            throw Failure("view needs an interactive terminal. To open the phone beside an agent or another pane, use: terminal-phone view \(phone.name) --split right")
+        }
         if let value = cellSize ?? e["TERMINAL_PHONE_CELL_SIZE"] {
             let p = value.lowercased().split(separator: "x").compactMap { Double($0) }
             guard p.count == 2, p.allSatisfy({ $0.isFinite && (1...256).contains($0) }) else { throw Failure("--cell-size must be WIDTHxHEIGHT in terminal pixels, for example 9x24") }
             cellOverride = (p[0], p[1])
         } else { cellOverride = nil }
-        self.graphics = selected
-        // Kitty-protocol terminals start on PNG until they confirm shared memory support.
-        renderer = PhoneRenderer(writer: writer, transport: selected == "iterm" ? .iterm : .kittyDirect)
+        // Nothing is drawn until the terminal has been probed; this is only the starting point.
+        renderer = PhoneRenderer(writer: writer, transport: .blocks)
+    }
+
+    /// Detects the terminal, and inside tmux lets image escapes pass through to it.
+    private func prepareTerminal() async {
+        let env = ProcessInfo.processInfo.environment
+        var tmuxClient: String?, passthrough = false
+        if env["TMUX"] != nil, let tmux = TerminalSplit.find("tmux") {
+            tmuxClient = (try? await CommandRunner.checked(tmux, ["display-message", "-p", "#{client_termname}"], timeout: 5))
+                .map { String(decoding: $0, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) }
+            // Pane-scoped, so it ends with this pane. tmux before 3.3 has no passthrough option.
+            var arguments = ["set-option", "-p"]
+            if let pane = env["TMUX_PANE"] { arguments += ["-t", pane] }
+            passthrough = ((try? await CommandRunner.run(tmux, arguments + ["allow-passthrough", "on"], timeout: 5))?.status ?? 1) == 0
+        }
+        profile = TerminalProfile.detect(env, tmuxClientTerm: tmuxClient)
+        if profile.tmux && !passthrough && requestedGraphics != .blocks { profile.graphics = .blocks; profile.needsGraphicsProbe = false }
+        Theme.depth = profile.colors
+        Theme.glyphs = profile.richGlyphs ? .rich : .plain
+        if let requestedGraphics { profile.graphics = requestedGraphics; profile.needsGraphicsProbe = requestedGraphics == .kitty }
+    }
+
+    /// The probes to send, and how to read their replies. DA1 goes last: terminals answer in
+    /// order, so its reply means every earlier query has been answered or ignored.
+    private func graphicsProbe() -> (query: String, cleanup: () -> Void)? {
+        guard profile.needsGraphicsProbe else { return nil }
+        let wrap: (String) -> String = profile.tmux ? TerminalProfile.tmuxPassthrough : { $0 }
+        var query = "", cleanup: () -> Void = {}
+        if profile.graphics == .kitty || profile.app == .unknown {
+            if let shm = PhoneRenderer.sharedMemoryProbe() { query += wrap(shm.query); cleanup = shm.cleanup }
+            query += wrap("\u{1b}_Gi=32,s=1,v=1,a=q,t=d,f=24;AAAA\u{1b}\\")
+        }
+        return (query + "\u{1b}[c", cleanup)
+    }
+
+    /// Picks the transport from the probe replies (or their absence).
+    private func decideGraphics() -> (GraphicsTransport, RenderTarget) {
+        var target = RenderTarget(tmux: profile.tmux, placeholders: false, depth: profile.colors)
+        let shm = metrics.graphicsReplies[31] == "OK", direct = metrics.graphicsReplies[32] == "OK"
+        let mode: GraphicsMode
+        switch profile.graphics {
+        case .kitty where !profile.needsGraphicsProbe: mode = .kitty
+        // Replies don't always make it back through tmux, so trust the terminal it named.
+        case .kitty: mode = shm || direct || profile.tmux ? .kitty : .blocks
+        case .iterm where profile.app == .vscode:
+            mode = metrics.primaryAttributes?.contains(4) == true ? .iterm : .blocks
+            if mode == .blocks { record("Text graphics. For a sharp phone, turn on terminal.integrated.enableImages", ok: true) }
+        case .iterm: mode = .iterm
+        case .blocks: mode = shm || direct ? .kitty : .blocks
+        }
+        if mode == .blocks, requestedGraphics == nil, profile.app != .vscode {
+            record("Text graphics in \(profile.displayName). Ghostty, kitty, iTerm2 or WezTerm show the phone sharper", ok: true)
+        }
+        let transport: GraphicsTransport
+        switch mode {
+        case .kitty:
+            transport = shm ? .kittySharedMemory : .kittyDirect
+            target.placeholders = profile.tmux
+        case .iterm: transport = .iterm
+        case .blocks: transport = .blocks
+        }
+        return (transport, target)
     }
 
     func run() async throws {
+        await prepareTerminal()
         configureInput()
         defer { inputController?.stop() }
         var original = termios()
@@ -85,9 +152,8 @@ final class PhoneViewer {
         // Mouse reporting is always on: the toolbar is clickable even in read-only mode.
         writer.write("\u{1b}[?1049h\u{1b}[?25l\u{1b}[2J\u{1b}[?1002h\u{1b}[?1006h\u{1b}]11;?\u{7}")
         queryMetrics()
-        var probe = graphics == "kitty" ? PhoneRenderer.sharedMemoryProbe() : nil
+        var probe = graphicsProbe()
         if let probe { writer.write(probe.query) }
-        var transportDecided = probe == nil
         defer {
             renderer.configure(placement: nil)
             live?.stop(); polling?.cancel(); switching?.cancel()
@@ -122,15 +188,16 @@ final class PhoneViewer {
                 handle(parser.feed(metrics.feed([], flush: true), flushEscape: true))
             }
             // The probe reply arrives with the cell metrics, typically within a few milliseconds.
-            if !transportDecided, metrics.graphicsReplies[31] != nil || Date().timeIntervalSince(started) > 0.4 {
-                transportDecided = true
-                if metrics.graphicsReplies[31] == "OK" { renderer.configure(placement: placement, transport: .kittySharedMemory) }
+            if !graphicsReady, probe == nil || metrics.primaryAttributes != nil || Date().timeIntervalSince(started) > (profile.tmux ? 0.8 : 0.5) {
+                let (transport, target) = decideGraphics()
+                renderer.configure(placement: nil, transport: transport, target: target)
                 probe?.cleanup(); probe = nil
-                renderer.redraw()
+                graphicsReady = true
+                relayout(clear: true)
             }
             // Wait briefly for real cell metrics so the first stream is requested at the right size.
             let settled = metrics.cellHeight != nil || cellOverride != nil || Date().timeIntervalSince(started) > 0.4
-            if transportDecided, settled, live == nil, polling == nil, switching == nil {
+            if graphicsReady, settled, live == nil, polling == nil, switching == nil {
                 if cli.touchAvailable || phone.isDevice { startStream() } else { polling = startPolling() }
             }
             if live != nil { rescaleStreamIfNeeded() }
@@ -206,8 +273,12 @@ final class PhoneViewer {
 
     // MARK: Layout
 
+    /// Nothing is drawn until the graphics protocol is chosen, so the phone never flashes in the wrong one.
+    private var graphicsReady = false
     private var placement: FramePlacement? {
-        layout.map { FramePlacement(viewport: $0.viewport, background: graphics == "iterm" ? (metrics.background ?? 0x1e1e1e) : nil) }
+        guard graphicsReady else { return nil }
+        return layout.map { FramePlacement(viewport: $0.viewport, background: graphics == .iterm ? (metrics.background ?? 0x1e1e1e) : nil,
+                                    mask: menuArea.map { CellRect(column: $0.column, row: $0.row, columns: $0.width, rows: $0.height) }) }
     }
     private func queryMetrics() { writer.write("\u{1b}[16t\u{1b}[14t\u{1b}]1337;ReportCellSize\u{7}") }
     /// `clear` wipes the screen first; zoom and pan changes only move the image.
@@ -218,15 +289,17 @@ final class PhoneViewer {
         // Roomy: two header lines and a divider on top, a three-line toolbar below.
         let roomy = rows >= 20 && cols >= 30
         let top = roomy ? 4 : 2, bottom = roomy ? rows - 3 : rows - 1
-        let viewport = PhoneViewport(frame: DeviceFrame(screenWidth: screen.width, screenHeight: screen.height),
+        let viewport = PhoneViewport(frame: DeviceFrame(screenWidth: screen.width, screenHeight: screen.height, finish: finish),
                                      column: 1, row: top, columns: cols, rows: max(1, bottom - top + 1),
                                      cellWidth: cw * metrics.cellScale, cellHeight: ch * metrics.cellScale, zoom: zoom, pan: pan)
         let next = Layout(viewport: viewport, columns: cols, rows: rows, roomy: roomy)
+        let palette = Palette.matching(background: metrics.background)
+        if palette != Theme.palette { Theme.palette = palette; previousChrome = "" }
         guard clear || next != layout else { return }
         let resized = next.columns != layout?.columns || next.rows != layout?.rows || next.roomy != layout?.roomy
         layout = next
         if clear || resized { writer.write("\u{1b}[0m\u{1b}[2J"); previousChrome = ""; menuArea = nil }
-        else if graphics == "iterm" { eraseScreenText() }
+        else if imagesAreText { eraseScreenText() }
         renderer.configure(placement: placement)
         drawChrome()
         renderer.redraw()
@@ -286,7 +359,7 @@ final class PhoneViewer {
 
         // Header: "terminal-phone · default ⌄" opens the device menu; FPS and zoom on the right.
         let title: [Span] = [Span(" terminal-phone", Theme.bold + Theme.text), Span(" · ", Theme.faint),
-                             Span(phone.name, Theme.bold + Theme.accent), Span(" ⌄", menu != nil ? Theme.accent : Theme.muted)]
+                             Span(phone.name, Theme.bold + Theme.accent), Span(" " + Theme.glyphs.menu, menu != nil ? Theme.accent : Theme.muted)]
         let rate: [Span] = switch link {
         case .connecting: [Span("\(spin) connecting", Theme.yellow)]
         case .polling: [Span("FPS: ", Theme.muted), Span("screenshots", Theme.cyan)]
@@ -294,8 +367,9 @@ final class PhoneViewer {
         }
         let zoomText = abs(zoom - 1) < 0.01 ? [] : [Span("  \(Int((zoom * 100).rounded()))%", Theme.faint)]
         var right: [([Span], Action?)] = [(rate + zoomText + [Span("  ")], nil)]
-        let zoomButtons = [icon("⊖", .zoomOut), ([Span("│", Theme.border)], nil), icon("⊡", .zoomFit), ([Span("│", Theme.border)], nil),
-                           icon("①", .zoomActual), ([Span("│", Theme.border)], nil), icon("⊕", .zoomIn), ([Span(" ")], nil)]
+        let g = Theme.glyphs
+        let zoomButtons = [icon(g.zoomOut, .zoomOut), ([Span("│", Theme.border)], nil), icon(g.zoomFit, .zoomFit), ([Span("│", Theme.border)], nil),
+                           icon(g.zoomActual, .zoomActual), ([Span("│", Theme.border)], nil), icon(g.zoomIn, .zoomIn), ([Span(" ")], nil)]
         if title.width + 2 + right.reduce(0, { $0 + $1.0.width }) + zoomButtons.reduce(0, { $0 + $1.0.width }) <= cols { right += zoomButtons }
         else if title.width + 2 + right.reduce(0, { $0 + $1.0.width }) > cols { right = [] }
         row(1, left: [(title, .menu)], right: right)
@@ -315,7 +389,7 @@ final class PhoneViewer {
             case .polling: "Waiting for a screenshot"
             case .live: "Waiting for the first frame"
             }
-            let lines: [[Span]] = [[Span(spin, Theme.accent)], [Span(message, Theme.text)], [Span(phone.name, Theme.faint)]]
+            let lines: [[Span]] = [[Span(spin, Theme.accent)], [Span(message, Theme.text)], [Span("\(phone.name) · \(profile.displayName)", Theme.faint)]]
             if screenCells.columns > 4 {
                 for (offset, line) in lines.enumerated() {
                     let fitted = line.truncated(screenCells.columns)
@@ -337,11 +411,11 @@ final class PhoneViewer {
             let seconds = Int(now.timeIntervalSince(r.started)); return String(format: "Stop %d:%02d", seconds / 60, seconds % 60)
         } ?? "Record"
         var groups: [[(String, String, Action, String)]] = []
-        groups.append([("⌂", "Home", .home, readOnly ? Theme.muted : Theme.text), ("⏻", "Lock", .lock, readOnly ? Theme.muted : Theme.text)])
-        groups.append([(readOnly ? "▶" : "●", readOnly ? "Enable control" : "Control on", .control, readOnly ? Theme.yellow : Theme.green)])
+        groups.append([(g.home, "Home", .home, readOnly ? Theme.muted : Theme.text), (g.lock, "Lock", .lock, readOnly ? Theme.muted : Theme.text)])
+        groups.append([(readOnly ? g.controlOff : g.control, readOnly ? "Enable control" : "Control on", .control, readOnly ? Theme.yellow : Theme.green)])
         // Recording uses simctl, so real iPhones get screenshots only.
-        groups.append([("◎", "Screenshot", .screenshot, Theme.text)] + (phone.isDevice ? [] : [(recording == nil ? "●" : "■", recordLabel, .record, recording == nil ? Theme.text : Theme.red)]))
-        if dark != nil && !readOnly { groups.append([(dark == true ? "◑" : "◐", dark == true ? "Light" : "Dark", .appearance, Theme.text)]) }
+        groups.append([(g.screenshot, "Screenshot", .screenshot, Theme.text)] + (phone.isDevice ? [] : [(recording == nil ? g.record : g.stop, recordLabel, .record, recording == nil ? Theme.text : Theme.red)]))
+        if dark != nil && !readOnly { groups.append([(dark == true ? g.light : g.dark, dark == true ? "Light" : "Dark", .appearance, Theme.text)]) }
         func toolbar(labels: Bool) -> [([Span], Action?)] {
             var items: [([Span], Action?)] = []
             for (index, group) in groups.enumerated() {
@@ -366,7 +440,9 @@ final class PhoneViewer {
             row(layout.rows, left: [([Span(" ")], nil)] + items, right: [(statusLine(now: now, room: 30), nil)])
         }
 
+        let maskBefore = menuArea.map { [$0.column, $0.row, $0.width, $0.height] }
         if let menu { output += drawMenu(menu) }
+        if menuArea.map({ [$0.column, $0.row, $0.width, $0.height] }) != maskBefore { renderer.configure(placement: placement) }
 
         guard output != previousChrome else { return }
         previousChrome = output
@@ -376,7 +452,7 @@ final class PhoneViewer {
     /// The latest action result, or shortcut hints.
     private func statusLine(now: Date, room: Int) -> [Span] {
         if let last = activity.last, now.timeIntervalSince(last.at) < (last.ok ? 2.5 : 6) {
-            let toast = [Span(last.ok ? "✓ " : "✕ ", last.ok ? Theme.green : Theme.red), Span(last.text, last.ok ? Theme.text : Theme.red)] +
+            let toast = [Span(last.ok ? Theme.glyphs.check + " " : Theme.glyphs.cross + " ", last.ok ? Theme.green : Theme.red), Span(last.text, last.ok ? Theme.text : Theme.red)] +
                 (last.milliseconds.map { [Span(" · \(Int($0.rounded())) ms", Theme.faint)] } ?? []) + [Span(" ")]
             return toast.truncated(max(0, room))
         }
@@ -388,7 +464,7 @@ final class PhoneViewer {
     /// A dropdown of registered phones under the title. Every cell has a background so it covers the phone image.
     private func drawMenu(_ items: [MenuItem]) -> String {
         guard let layout else { return "" }
-        let surface = Theme.bg(0x1f2335), selected = Theme.bg(0x2f3549)
+        let surface = Theme.surface, selected = Theme.selected
         let width = min(layout.columns - 2, max(36, (items.map { $0.name.count + $0.detail.count + $0.state.count + 10 }.max() ?? 0)))
         let height = min(layout.rows - 2, max(1, items.count) + 3)
         let column = 2, top = 2
@@ -401,7 +477,7 @@ final class PhoneViewer {
         paint(top, [Span("╭─ ", Theme.border), Span("Phones", Theme.bold + Theme.accent), Span(" " + String(repeating: "─", count: max(0, width - 12)) + "╮", Theme.border)], background: surface)
         for (index, item) in items.prefix(height - 3).enumerated() {
             let current = item.name == phone.name, background = index == menuIndex ? selected : surface
-            let state = ["Booted", "Connected"].contains(item.state) ? Span("● ", Theme.green) : Span("○ ", Theme.faint)
+            let state = ["Booted", "Connected"].contains(item.state) ? Span(Theme.glyphs.live + " ", Theme.green) : Span(Theme.glyphs.idle + " ", Theme.faint)
             let left: [Span] = [Span("│ ", Theme.border), Span(current ? "✓ " : "  ", Theme.accent), state, Span(item.name, Theme.bold + Theme.text), Span("  " + item.detail, Theme.muted)]
             let tail = [Span(item.state.lowercased() + " ", Theme.faint), Span("│", Theme.border)]
             paint(top + 1 + index, left + [Span(String(repeating: " ", count: max(1, width - left.width - tail.width)))] + tail, background: background)
@@ -421,6 +497,21 @@ final class PhoneViewer {
     }
 
     // MARK: Actions
+
+    static func savedFrame(for phone: String, store: PhoneStore) -> FrameFinish {
+        (try? PhoneConfiguration.load(store: store))?.frame(for: phone) ?? .graphite
+    }
+    static func saveFrame(_ finish: FrameFinish, for phone: String, store: PhoneStore) {
+        guard var config = try? PhoneConfiguration.load(store: store) else { return }
+        config.setFrame(finish, for: phone); try? config.save(store: store)
+    }
+    private func cycleFrame() {
+        finish = finish.next
+        Self.saveFrame(finish, for: phone.name, store: cli.store)
+        relayout()
+        renderer.redraw()
+        record("Frame: \(finish.displayName)", ok: true)
+    }
 
     private func perform(_ action: Action) {
         flash = (action, Date())
@@ -474,7 +565,8 @@ final class PhoneViewer {
             writer.write((area.row..<(area.row + area.height)).map { "\u{1b}[\($0);\(area.column)H\u{1b}[0m" + String(repeating: " ", count: area.width) }.joined())
         }
         menuArea = nil; previousChrome = ""
-        if graphics == "iterm" { renderer.redraw() }
+        renderer.configure(placement: placement)
+        if imagesAreText { renderer.redraw() }
     }
 
     /// Boots the chosen phone if needed and moves the stream to it. The previous phone keeps running.
@@ -501,6 +593,7 @@ final class PhoneViewer {
                     screen = try cli.screen(saved, catalog: catalog)
                 }
                 phone = saved; zoom = 1; pan = (0.5, 0.5); dark = nil
+                finish = Self.savedFrame(for: saved.name, store: cli.store)
                 try cli.rememberPhone(saved.name)
                 configureInput()
                 renderer.reset()
@@ -626,6 +719,7 @@ final class PhoneViewer {
                 case "ctrl+r": perform(.record)
                 case "ctrl+b": perform(.home)
                 case "ctrl+l": perform(.lock)
+                case "ctrl+f": cycleFrame()
                 default:
                     if let code = ["return": 40, "escape": 41, "backspace": 42, "tab": 43, "delete": 76, "right": 79, "left": 80, "down": 81, "up": 82][key] { enqueue("key", [String(code)], label: "key \(key)") }
                 }

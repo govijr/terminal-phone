@@ -109,6 +109,29 @@ final class PhoneTests: XCTestCase {
         XCTAssertFalse(registered.acceptsInput)
         XCTAssertEqual(registered.displayModel, "iPhone 16 Plus")
         XCTAssertEqual(registered.displaySystem, "iOS 27.0")
+
+        // The owner's grant can be given and withdrawn without changing anything else.
+        let granted = registered.withInputAllowed(true)
+        XCTAssertTrue(granted.acceptsInput)
+        let revoked = granted.withInputAllowed(false)
+        XCTAssertFalse(revoked.acceptsInput)
+        XCTAssertEqual([revoked.name, revoked.udid, revoked.hardwareUDID, revoked.model], [registered.name, registered.udid, registered.hardwareUDID, registered.model])
+        XCTAssertTrue(revoked.isDevice)
+        // Revoking a simulator is a no-op: simulators have no owner grant.
+        let simulator = try Phone(name: "sim", udid: "6F1E2D3C-4B5A-4978-8695-A4B3C2D1E0F9", deviceType: "t", runtime: "r")
+        XCTAssertTrue(simulator.withInputAllowed(false).acceptsInput)
+    }
+
+    func testRevokedGrantPersistsThroughTheStore() throws {
+        let store = PhoneStore(root: FileManager.default.temporaryDirectory.appendingPathComponent("tp-revoke-\(UUID().uuidString)"))
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        let json: [String: Any] = ["result": ["devices": [["identifier": "6F1E2D3C-4B5A-4978-8695-A4B3C2D1E0F9",
+            "hardwareProperties": ["udid": "00008140-000A1B2C3D4E5F6A", "productType": "iPhone17,4"]]]]]
+        let device = try ConnectedDevice.parse(JSONSerialization.data(withJSONObject: json))[0]
+        try store.save(Phone(name: "iphone", device: device, allowInput: true))
+        XCTAssertTrue(try store.load("iphone").acceptsInput)
+        try store.save(store.load("iphone").withInputAllowed(false))
+        XCTAssertFalse(try store.load("iphone").acceptsInput)
     }
     func testRegistrationsFromBeforeDevicesStillLoadAsSimulators() throws {
         let legacy = #"{"deviceType":"com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro","runtime":"com.apple.CoreSimulator.SimRuntime.iOS-26-1","name":"default","udid":"1C2D3E4F-5A6B-4C7D-8E9F-0A1B2C3D4E5F"}"#

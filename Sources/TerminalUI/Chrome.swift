@@ -41,11 +41,11 @@ public struct Palette: Equatable, Sendable {
 
 /// Toolbar and header symbols. The plain set avoids glyphs that common fonts draw wide or not at all.
 public struct Glyphs: Equatable, Sendable {
-    public let home, lock, control, controlOff, screenshot, record, stop, dark, light, zoomOut, zoomFit, zoomActual, zoomIn, menu, live, idle, check, cross: String
+    public let home, lock, control, controlOff, screenshot, record, stop, dark, light, zoomOut, zoomFit, zoomActual, zoomIn, menu, live, idle, check, cross, frame, tools, logs, appStore: String
     public static let rich = Glyphs(home: "⌂", lock: "⏻", control: "●", controlOff: "▶", screenshot: "◎", record: "●", stop: "■", dark: "◐", light: "◑",
-                                    zoomOut: "⊖", zoomFit: "⊡", zoomActual: "①", zoomIn: "⊕", menu: "⌄", live: "●", idle: "○", check: "✓", cross: "✕")
+                                    zoomOut: "−", zoomFit: "Fit", zoomActual: "1:1", zoomIn: "+", menu: "⌄", live: "●", idle: "○", check: "✓", cross: "✕", frame: "▣", tools: "⚙", logs: "☰", appStore: "✦")
     public static let plain = Glyphs(home: "⌂", lock: "◉", control: "●", controlOff: "▶", screenshot: "◎", record: "●", stop: "■", dark: "◐", light: "◑",
-                                     zoomOut: "−", zoomFit: "□", zoomActual: "1:1", zoomIn: "+", menu: "▾", live: "●", idle: "○", check: "✓", cross: "×")
+                                     zoomOut: "−", zoomFit: "Fit", zoomActual: "1:1", zoomIn: "+", menu: "▾", live: "●", idle: "○", check: "✓", cross: "×", frame: "□", tools: "≡", logs: "¶", appStore: "*")
 }
 
 /// The chrome's colours and symbols. Respects NO_COLOR (https://no-color.org).

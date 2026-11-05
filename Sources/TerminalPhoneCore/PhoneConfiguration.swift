@@ -7,6 +7,8 @@ public struct PhoneConfiguration: Codable, Equatable {
     /// Frame finish per phone name, as `FrameFinish` raw values.
     public var frames: [String: String]?
     public func frame(for phone: String) -> FrameFinish? { frames?[phone].flatMap(FrameFinish.init(rawValue:)) }
+    /// The viewer's App Store panel settings.
+    public var appStore: AppStoreSettings?
     public mutating func setFrame(_ finish: FrameFinish, for phone: String) { var all = frames ?? [:]; all[phone] = finish.rawValue; frames = all }
     public init(preferredPhone: String? = nil, developerDirectory: String? = nil, signingTeam: String? = nil) {
         self.preferredPhone = preferredPhone; self.developerDirectory = developerDirectory; self.signingTeam = signingTeam

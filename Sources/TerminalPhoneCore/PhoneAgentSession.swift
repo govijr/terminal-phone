@@ -20,6 +20,8 @@ public final class PhoneAgentSession {
     private var humanActiveUntil = Date.distantPast
     private var pendingIDs: Set<String> = []
     private struct DeliveryFailure: Error { let kind: PhoneAction.Kind; let error: AgentError }
+    /// Called for every input that reached (or may have reached) the phone, for the action log.
+    public var onAction: ((PhoneActionLogEntry) -> Void)?
 
     public init(backend: PhoneBackend, artifacts: URL, inputAllowed: @escaping () throws -> Bool,
                 acquireControl: @escaping () throws -> AnyObject) {
@@ -59,6 +61,7 @@ public final class PhoneAgentSession {
         let cancelled = { isCancelled() || (request.operation != .input && epoch != self.inputEpoch) }
         var receipt: PhoneActionReceipt?
         var observation: PhoneObservation?
+        var resolved: PhoneElement?
         let result: PhoneAgentReply
         do {
             try request.validate()
@@ -105,6 +108,7 @@ public final class PhoneAgentSession {
                 let current = appAction ? nil : try await backend.capture()
                 try checkCancellation(cancelled)
                 let target = try current.flatMap { try resolve(action.target, scene: $0.scene) }
+                resolved = target
                 if let points = action.coordinates, let current {
                     for index in stride(from: 0, to: points.count, by: 2) {
                         guard points[index] < current.scene.width, points[index + 1] < current.scene.height else {
@@ -135,6 +139,10 @@ public final class PhoneAgentSession {
             result = reply(failure.error, observation: observation, action: receipt)
         } catch {
             result = reply(AgentError.backend(error), observation: observation, action: receipt)
+        }
+        if let action = request.action, let outcome = result.action?.outcome {
+            onAction?(PhoneActionLogEntry(source: request.operation == .input ? "viewer" : "agent", action: action, target: resolved,
+                                          outcome: outcome == "unknown" ? "unknown" : "delivered", error: result.error?.message, requestId: request.id))
         }
         remembered[request.id] = (request, result); requestOrder.append(request.id)
         if requestOrder.count > 128 { remembered.removeValue(forKey: requestOrder.removeFirst()) }

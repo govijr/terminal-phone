@@ -19,7 +19,8 @@ Especially:
 
 ## Design notes
 
-- Real iPhones are view-only until the owner approves input with `terminal-phone connect` or `--allow-input`. The grant is re-read on every request.
+- Real iPhones are view-only until the owner approves input with `terminal-phone connect` or `--allow-input`. The grant is re-read on every request, and `terminal-phone device revoke NAME` withdraws it.
+- The view-only grant is enforced by terminal-phone, not by WebDriverAgent. While the WDA runner is running on an iPhone, it serves an unauthenticated HTTP API (port 8100) and MJPEG stream (port 9100). Anything that can reach those ports can control or watch the phone, whatever the grant says. `terminal-phone stop NAME` ends the runner. Reports of ways to reach WDA beyond the CoreDevice tunnel are in scope.
 - Local control sockets live in a user-owned `0700` directory with `0600` sockets and peer-ownership checks.
 - Runtime downloads (idb_companion, Python, WebDriverAgent source, Python wheels) are pinned by SHA-256.
 - Screen text and screenshots are treated as untrusted data in the agent guide. Screenshots aren't pixel-redacted, so treat them as sensitive.

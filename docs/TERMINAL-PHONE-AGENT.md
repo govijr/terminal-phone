@@ -57,7 +57,7 @@ References are observation-scoped, not persistent element IDs. Every new observa
 ```sh
 terminal-phone session start work
 terminal-phone session status work
-terminal-phone view work --read-only
+terminal-phone view work --read-only --split right
 terminal-phone session release work
 terminal-phone session stop work
 ```

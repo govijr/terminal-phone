@@ -45,7 +45,7 @@ Run live checks against a dedicated phone name (for example `validation`), never
 
 ## Releasing (maintainers)
 
-1. Bump `PhoneAgentAPI.productVersion` and tag `vX.Y.Z`. The release workflow tests, builds and attaches the archive.
-2. Update `homebrew/terminal-phone.rb` in the tap repository with the new tag's source URL and `sha256`.
+1. Bump `PhoneAgentAPI.productVersion` and the version in the README's download commands.
+2. Tag `vX.Y.Z`. The release workflow tests, builds and attaches the archive and its `.sha256`.
 
 By contributing, you agree your contributions are licensed under the MIT License.

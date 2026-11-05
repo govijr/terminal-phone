@@ -1,6 +1,6 @@
 name: Release
 # Pushing a vX.Y.Z tag tests, builds and publishes a GitHub release. Binaries are ad-hoc signed and built
-# from this public source; users install with Homebrew (source build) or curl, so no Apple signing is needed.
+# from this public source; users download with curl (no quarantine flag), so no Apple signing is needed.
 on:
   push:
     tags: ['v*']
@@ -18,6 +18,8 @@ jobs:
         run: |
           grep -q "productVersion = \"${GITHUB_REF_NAME#v}\"" Sources/TerminalPhoneCore/*.swift \
             || { echo "Tag $GITHUB_REF_NAME doesn't match PhoneAgentAPI.productVersion"; exit 1; }
+          grep -q "releases/download/$GITHUB_REF_NAME" README.md \
+            || { echo "README download commands don't point at $GITHUB_REF_NAME"; exit 1; }
       - name: Test
         run: swift test
       - name: Build and package
@@ -28,5 +30,3 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" --title "terminal-phone ${GITHUB_REF_NAME#v}" --generate-notes \
             dist/releases/terminal-phone-*-macos-arm64.tar.gz dist/releases/terminal-phone-*-macos-arm64.tar.gz.sha256
-          sha="$(curl -fsSL "https://github.com/$GITHUB_REPOSITORY/archive/refs/tags/$GITHUB_REF_NAME.tar.gz" | shasum -a 256 | awk '{print $1}')"
-          echo "Homebrew formula: url https://github.com/$GITHUB_REPOSITORY/archive/refs/tags/$GITHUB_REF_NAME.tar.gz  sha256 $sha" >> "$GITHUB_STEP_SUMMARY"

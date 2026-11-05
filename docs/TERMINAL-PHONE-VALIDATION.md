@@ -104,7 +104,7 @@ These items describe the earlier prototype; the 0.2.0 record above supersedes im
 
 - A human should inspect appearance, click alignment and typing in an actual Ghostty, Kitty or iTerm2 pane. The PTY checks verify protocol framing and terminal restoration, not an emulator's visual rendering or performance.
 - Test varied third-party app layouts, text input languages, permissions, orientation changes and concurrent agents on different named phones.
-- Project build detection, automatic terminal splits, tmux support, video streaming, recording, real-device and Android backends are not implemented.
+- Project build detection and Android backends are not implemented. Terminal detection, graphics selection and split plans for each terminal are covered by unit tests (`TerminalProfileTests`, `TerminalSplitTests`); splits in each real emulator still need a manual check.
 - There is no Developer ID/notarized phone release or hosted installer. Xcode, runtimes and automation dependencies are not bundled for redistribution.
 
 Reproduce the live checks after building both executables and setting up idb:

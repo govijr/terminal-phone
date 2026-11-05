@@ -14,3 +14,7 @@ terminal-phone doesn't bundle these components in its source or release archives
 | [h2](https://github.com/python-hyper/h2), [hpack](https://github.com/python-hyper/hpack), [hyperframe](https://github.com/python-hyper/hyperframe) | HTTP/2 for grpclib | MIT |
 
 Apple's Xcode, simulators, `simctl` and `devicectl` are used as installed on your Mac and are covered by Apple's terms.
+
+## Reference material
+
+The Apple Event codes terminal-phone uses to split Ghostty panes (in `Sources/TerminalPhone/TerminalSplit.swift`) were taken from [pixel](https://pixelgui.com/) by Zenbu Labs, under the MIT License. No pixel code is bundled.

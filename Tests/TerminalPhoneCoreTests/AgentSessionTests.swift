@@ -14,6 +14,7 @@ private final class TestPhoneBackend: PhoneBackend {
     var delay: UInt64 = 0
     var foregroundApp = true
     var inputDelay: UInt64 = 0
+    var inputsStarted = 0
     init(_ scenes: [PhoneScene]) { self.scenes = scenes }
     func capabilities(inputAllowed: Bool) -> PhoneCapabilities {
         PhoneCapabilities(backend: "test", inputAllowed: inputAllowed, foregroundApp: foregroundApp, elementActions: "test", actions: PhoneAction.Kind.allCases)
@@ -26,6 +27,7 @@ private final class TestPhoneBackend: PhoneBackend {
         return PhoneCapture(scene: scene, png: Data([137, 80, 78, 71]))
     }
     func perform(_ action: PhoneAction, target: PhoneElement?) async throws {
+        inputsStarted += 1
         if inputDelay > 0 { try await Task.sleep(nanoseconds: inputDelay) }
         actions.append((action, target))
         if performFailure { throw AgentError(.disconnected, "Reply lost after input.") }
@@ -212,10 +214,13 @@ final class AgentSessionTests: XCTestCase {
     }
 
     @MainActor func testReleaseKeepsOwnershipUntilNativeInputFinishes() async throws {
-        let backend = TestPhoneBackend([scene()]); backend.inputDelay = 70_000_000
+        // Wait for the input to actually start instead of guessing with short sleeps, and keep it running
+        // long enough that a slow CI runner can't finish it before the assertions.
+        let backend = TestPhoneBackend([scene()]); backend.inputDelay = 500_000_000
         let session = session(backend, root: directory())
         let input = Task { await session.handle(PhoneAgentRequest(operation: .input, action: PhoneAction(kind: .press, text: "HOME"), includeImage: false)) }
-        try await Task.sleep(nanoseconds: 10_000_000)
+        for _ in 0..<200 where backend.inputsStarted == 0 { try await Task.sleep(nanoseconds: 5_000_000) }
+        XCTAssertEqual(backend.inputsStarted, 1)
         var released = false
         let release = Task { let reply = await session.handle(PhoneAgentRequest(operation: .release)); released = true; return reply }
         try await Task.sleep(nanoseconds: 10_000_000)

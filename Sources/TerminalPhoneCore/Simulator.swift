@@ -104,6 +104,14 @@ public struct Phone: Codable {
         self.name = name; udid = device.identifier; deviceType = device.productType; runtime = "iOS \(device.osVersion)"
         kind = .device; model = device.marketingName; hardwareUDID = device.hardwareUDID; self.allowInput = allowInput
     }
+    private init(copying phone: Phone, allowInput: Bool?) {
+        name = phone.name; udid = phone.udid; deviceType = phone.deviceType; runtime = phone.runtime
+        kind = phone.kind; model = phone.model; hardwareUDID = phone.hardwareUDID; self.allowInput = allowInput
+    }
+    /// The same registration with the owner's input grant set or withdrawn. Simulators always accept input.
+    public func withInputAllowed(_ allowed: Bool) -> Phone {
+        Phone(copying: self, allowInput: isDevice ? allowed : allowInput)
+    }
 }
 
 /// A real iPhone as reported by `xcrun devicectl list devices --json-output`.

@@ -5,12 +5,65 @@ import Foundation
 public typealias PhoneDisplayLayout = ImageLayout
 public typealias PhoneMetricFilter = TerminalMetricFilter
 
+/// The colour of the phone's metal band and buttons, after real iPhone finishes.
+public enum FrameFinish: String, CaseIterable, Equatable, Sendable {
+    case graphite, black, silver, white, gold, orange, red, pink, yellow, green, blue, purple
+
+    /// The band's base colour, its polished edge highlight, and the side buttons.
+    public var band: UInt32 { colors.band }
+    public var highlight: UInt32 { colors.highlight }
+    public var buttons: UInt32 { colors.buttons }
+    public var displayName: String {
+        switch self {
+        case .graphite: "Graphite"
+        case .black: "Space Black"
+        case .silver: "Silver"
+        case .white: "White"
+        case .gold: "Gold"
+        case .orange: "Cosmic Orange"
+        case .red: "Red"
+        case .pink: "Pink"
+        case .yellow: "Yellow"
+        case .green: "Sage"
+        case .blue: "Deep Blue"
+        case .purple: "Deep Purple"
+        }
+    }
+    private var colors: (band: UInt32, highlight: UInt32, buttons: UInt32) {
+        switch self {
+        case .graphite: (0x4a4a50, 0x8e8e96, 0x3a3a40)
+        case .black: (0x2a2a2d, 0x5e5e64, 0x1f1f22)
+        case .silver: (0xc9cbce, 0xf6f7f8, 0xa9abaf)
+        case .white: (0xe9e7e1, 0xffffff, 0xcfccc4)
+        case .gold: (0xd9c39b, 0xf8ead0, 0xbea77d)
+        case .orange: (0xe0692a, 0xffae78, 0xbf541b)
+        case .red: (0xb01e2b, 0xe8636d, 0x8c1621)
+        case .pink: (0xedc3c9, 0xfdeaec, 0xd6a5ad)
+        case .yellow: (0xefd468, 0xfff1ad, 0xd3b74c)
+        case .green: (0x6b8468, 0xa9c0a6, 0x566c54)
+        case .blue: (0x2d3f5e, 0x7186ad, 0x22314a)
+        case .purple: (0x564773, 0x9a89bf, 0x43375c)
+        }
+    }
+    /// Accepts the raw name or the display name, ignoring case and spaces ("cosmic orange", "space-black").
+    public init?(named name: String) {
+        let key = name.lowercased().filter { $0.isLetter }
+        guard let match = Self.allCases.first(where: { $0.rawValue == key || $0.displayName.lowercased().filter(\.isLetter) == key }) else { return nil }
+        self = match
+    }
+    public var next: FrameFinish { let all = Self.allCases; return all[(all.firstIndex(of: self)! + 1) % all.count] }
+    public static var names: String { allCases.map(\.rawValue).joined(separator: ", ") }
+}
+
 /// An iPhone-style body drawn around the simulator screen, measured in display points.
 public struct DeviceFrame: Equatable {
     public let screenWidth: Double
     public let screenHeight: Double
-    public static let bezel = 12.0, rim = 3.5, button = 3.0
-    public init(screenWidth: Int, screenHeight: Int) { self.screenWidth = Double(screenWidth); self.screenHeight = Double(screenHeight) }
+    public var finish: FrameFinish
+    public static let bezel = 9.5, rim = 6.0, button = 3.0
+    public init(screenWidth: Int, screenHeight: Int, finish: FrameFinish = .graphite) {
+        self.screenWidth = Double(screenWidth); self.screenHeight = Double(screenHeight); self.finish = finish
+    }
     public var inset: Double { Self.bezel + Self.rim }
     public var width: Double { screenWidth + 2 * (inset + Self.button) }
     public var height: Double { screenHeight + 2 * inset }

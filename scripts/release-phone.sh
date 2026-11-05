@@ -39,7 +39,7 @@ if [[ $mode = signed ]]; then
   rm "$phone_staging/notarize.zip" "$phone_staging/notary.plist"
   distribution="Developer ID signed and notarized by Apple."
 else
-  distribution="Local build, ad-hoc signed: it runs on the Mac that built it. Public downloads use release-phone.sh --signed."
+  distribution="Ad-hoc signed, built from public source. Download it with curl (as the README shows) so macOS doesn't quarantine it; if you used a browser, run: xattr -dr com.apple.quarantine terminal-phone"
 fi
 cat > "$phone_staging/terminal-phone/README.txt" <<README
 terminal-phone $phone_release_version

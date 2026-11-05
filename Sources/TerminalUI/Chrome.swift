@@ -20,18 +20,66 @@ extension Array where Element == Span {
     public var rendered: String { map { $0.style.isEmpty ? $0.text : $0.style + $0.text + Theme.reset }.joined() }
 }
 
-/// Tokyo Night-flavoured palette. Respects NO_COLOR (https://no-color.org).
+/// Colours for one terminal background. Tokyo Night on dark terminals, Tokyo Night Day on light ones.
+public struct Palette: Equatable, Sendable {
+    public let text, muted, faint, border, accent, green, yellow, red, magenta, cyan: UInt32
+    /// Filled areas: menus, pressed keys, the badge's text.
+    public let surface, selected, keyBackground, onAccent: UInt32
+    public static let dark = Palette(text: 0xc0caf5, muted: 0x737aa2, faint: 0x545c7e, border: 0x3b4261, accent: 0x7aa2f7,
+                                     green: 0x9ece6a, yellow: 0xe0af68, red: 0xf7768e, magenta: 0xbb9af7, cyan: 0x7dcfff,
+                                     surface: 0x1f2335, selected: 0x2f3549, keyBackground: 0x24283b, onAccent: 0x1a1b26)
+    public static let light = Palette(text: 0x3760bf, muted: 0x6172b0, faint: 0x8990b3, border: 0xa8aecb, accent: 0x2e7de9,
+                                      green: 0x587539, yellow: 0x8c6c3e, red: 0xf52a65, magenta: 0x9854f1, cyan: 0x007197,
+                                      surface: 0xe9e9ed, selected: 0xd0d5e3, keyBackground: 0xd8dce8, onAccent: 0xffffff)
+    /// Picks the palette that reads best on a terminal background of 0xRRGGBB.
+    public static func matching(background: UInt32?) -> Palette {
+        guard let background else { return .dark }
+        let r = Double(background >> 16 & 255), g = Double(background >> 8 & 255), b = Double(background & 255)
+        return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 > 0.55 ? .light : .dark
+    }
+}
+
+/// Toolbar and header symbols. The plain set avoids glyphs that common fonts draw wide or not at all.
+public struct Glyphs: Equatable, Sendable {
+    public let home, lock, control, controlOff, screenshot, record, stop, dark, light, zoomOut, zoomFit, zoomActual, zoomIn, menu, live, idle, check, cross: String
+    public static let rich = Glyphs(home: "⌂", lock: "⏻", control: "●", controlOff: "▶", screenshot: "◎", record: "●", stop: "■", dark: "◐", light: "◑",
+                                    zoomOut: "⊖", zoomFit: "⊡", zoomActual: "①", zoomIn: "⊕", menu: "⌄", live: "●", idle: "○", check: "✓", cross: "✕")
+    public static let plain = Glyphs(home: "⌂", lock: "◉", control: "●", controlOff: "▶", screenshot: "◎", record: "●", stop: "■", dark: "◐", light: "◑",
+                                     zoomOut: "−", zoomFit: "□", zoomActual: "1:1", zoomIn: "+", menu: "▾", live: "●", idle: "○", check: "✓", cross: "×")
+}
+
+/// The chrome's colours and symbols. Respects NO_COLOR (https://no-color.org).
+/// The viewer sets `palette`, `depth` and `glyphs` once it knows the terminal.
 public enum Theme {
     public static let color = ProcessInfo.processInfo.environment["NO_COLOR"].map(\.isEmpty) ?? true
+    nonisolated(unsafe) public static var palette = Palette.dark
+    nonisolated(unsafe) public static var depth = ColorDepth.truecolor
+    nonisolated(unsafe) public static var glyphs = Glyphs.rich
     public static let reset = "\u{1b}[0m"
-    public static func fg(_ hex: UInt32) -> String { color ? "\u{1b}[38;2;\(hex >> 16 & 255);\(hex >> 8 & 255);\(hex & 255)m" : "" }
-    public static func bg(_ hex: UInt32) -> String { color ? "\u{1b}[48;2;\(hex >> 16 & 255);\(hex >> 8 & 255);\(hex & 255)m" : "" }
+    public static func fg(_ hex: UInt32) -> String {
+        guard color else { return "" }
+        return depth == .truecolor ? "\u{1b}[38;2;\(hex >> 16 & 255);\(hex >> 8 & 255);\(hex & 255)m" : "\u{1b}[38;5;\(ANSI256.index(hex))m"
+    }
+    public static func bg(_ hex: UInt32) -> String {
+        guard color else { return "" }
+        return depth == .truecolor ? "\u{1b}[48;2;\(hex >> 16 & 255);\(hex >> 8 & 255);\(hex & 255)m" : "\u{1b}[48;5;\(ANSI256.index(hex))m"
+    }
     public static let bold = "\u{1b}[1m"
 
-    public static let text = fg(0xc0caf5), muted = fg(0x737aa2), faint = fg(0x545c7e), border = fg(0x3b4261)
-    public static let accent = fg(0x7aa2f7), green = fg(0x9ece6a), yellow = fg(0xe0af68), red = fg(0xf7768e), magenta = fg(0xbb9af7), cyan = fg(0x7dcfff)
-    public static let badge = bold + fg(0x1a1b26) + bg(0x7aa2f7)
-    public static let key = bold + fg(0x7dcfff) + bg(0x24283b)
+    public static var text: String { fg(palette.text) }
+    public static var muted: String { fg(palette.muted) }
+    public static var faint: String { fg(palette.faint) }
+    public static var border: String { fg(palette.border) }
+    public static var accent: String { fg(palette.accent) }
+    public static var green: String { fg(palette.green) }
+    public static var yellow: String { fg(palette.yellow) }
+    public static var red: String { fg(palette.red) }
+    public static var magenta: String { fg(palette.magenta) }
+    public static var cyan: String { fg(palette.cyan) }
+    public static var badge: String { bold + fg(palette.onAccent) + bg(palette.accent) }
+    public static var key: String { bold + fg(palette.cyan) + bg(palette.keyBackground) }
+    public static var surface: String { bg(palette.surface) }
+    public static var selected: String { bg(palette.selected) }
     public static let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 }
 
@@ -54,4 +102,3 @@ public enum Box {
         return "\u{1b}[\(row);\(column)H" + fitted.rendered + String(repeating: " ", count: max(0, width - fitted.width))
     }
 }
-

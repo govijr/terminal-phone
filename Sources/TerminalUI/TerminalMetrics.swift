@@ -59,6 +59,8 @@ public struct TerminalMetricFilter {
     public private(set) var graphicsReplies: [Int: String] = [:]
     public private(set) var windowWidth: Double?
     public private(set) var windowHeight: Double?
+    /// Primary device attributes from a DA1 reply, such as [62, 4, 22].
+    public private(set) var primaryAttributes: [Int]?
     private var pending: [UInt8] = []
     public init() {}
     public mutating func feed(_ bytes: [UInt8], flush: Bool = false) -> [UInt8] {
@@ -73,6 +75,12 @@ public struct TerminalMetricFilter {
             if pending[1] == 91 {
                 guard let end = pending.indices.dropFirst(2).first(where: { (64...126).contains(pending[$0]) }) else { break }
                 let sequence = Array(pending[0...end]); pending.removeFirst(end + 1)
+                // DA1 reply, ESC [ ? 62 ; 4 ; … c. Attribute 4 means sixel, which xterm.js advertises
+                // exactly when its image support (and so iTerm2 inline images) is enabled.
+                if sequence.count > 3, sequence[2] == 63, sequence.last == 99 {
+                    primaryAttributes = String(decoding: sequence.dropFirst(3).dropLast(), as: UTF8.self).split(separator: ";").compactMap { Int($0) }
+                    continue
+                }
                 if sequence.last == 116 {
                     let values = String(decoding: sequence.dropFirst(2).dropLast(), as: UTF8.self).split(separator: ";").compactMap { Double($0) }
                     if values.count == 3, values[1] > 0, values[2] > 0, values[1].isFinite, values[2].isFinite {

@@ -17,5 +17,10 @@ jobs:
         run: swift build --product terminal-phone
       - name: Test
         run: swift test
+      - name: Check install.sh
+        # Plain ASCII only: macOS bash 3.2 in a UTF-8 locale reads "$var…" as a longer variable name.
+        run: |
+          bash -n install.sh
+          ! LC_ALL=C grep -n '[^ -~	]' install.sh
       - name: Package (local, ad-hoc signed)
         run: bash scripts/release-phone.sh

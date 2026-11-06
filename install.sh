@@ -27,7 +27,7 @@ main() {
   # Global, not local: the EXIT trap runs after main returns, when a local would be gone.
   work="$(mktemp -d "${TMPDIR:-/tmp}/terminal-phone-install.XXXXXX")"
   trap 'rm -rf "$work"' EXIT
-  echo "Downloading terminal-phone $version…"
+  echo "Downloading terminal-phone ${version}..."
   # curl doesn't set the quarantine flag, so macOS runs the ad-hoc signed binary without a warning.
   curl -fsSL -o "$work/$package" "$base/$package"
   curl -fsSL -o "$work/$package.sha256" "$base/$package.sha256"

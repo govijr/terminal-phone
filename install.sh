@@ -24,7 +24,7 @@ main() {
   fi
   local package="terminal-phone-$version-macos-arm64.tar.gz"
   local base="https://github.com/$repo/releases/download/v$version"
-  local work
+  # Global, not local: the EXIT trap runs after main returns, when a local would be gone.
   work="$(mktemp -d "${TMPDIR:-/tmp}/terminal-phone-install.XXXXXX")"
   trap 'rm -rf "$work"' EXIT
   echo "Downloading terminal-phone $version…"

@@ -69,7 +69,11 @@ final class PhoneViewer {
     /// The open App Store panel's highlighted row, its settings, and the caption being typed.
     private var studio: Int?, studioSettings: AppStoreSettings, captionDraft: String?
     /// Set while an App Store preview records: how to compose it when it stops.
-    private var recordingStyle: (style: MediaStyle, points: Double)?
+    /// How the running recording is saved: an App Store preview in the panel's style, or a plain
+    /// recording, which becomes a framed, transparent clip of what was visible if you zoomed in.
+    /// `crops` follows the viewer's zoom and pan through the recording.
+    private struct RecordingPlan { let appStore: Bool; let style: MediaStyle?; let points: Double; var crops: [(time: Double, crop: MediaRect?)] }
+    private var recordingPlan: RecordingPlan?
     private var mediaTask: Task<Void, Never>?, lastMedia: URL?
 
     init(cli: PhoneCLI, phone: Phone, screen: PhoneScreen, graphics: String?, readOnly: Bool, cellSize: String? = nil) throws {
@@ -228,7 +232,7 @@ final class PhoneViewer {
             try await Task.sleep(nanoseconds: 4_000_000)
         }
         // An App Store preview is encoded after recording stops; finish it before leaving.
-        if recordingStyle != nil { stopRecording(wait: false) }
+        if recording != nil { stopRecording(wait: false) }
         if let mediaTask { record("Saving the app preview…", ok: true); previousChrome = ""; drawChrome(); await mediaTask.value }
         if let failure { throw Failure(failure) }
     }
@@ -350,6 +354,15 @@ final class PhoneViewer {
         renderer.configure(placement: placement)
         drawChrome()
         renderer.redraw()
+        trackCrop()
+    }
+    /// What part of the framed phone is in view: nil when all of it is.
+    private var visibleCrop: MediaRect? { layout?.viewport.visible }
+    /// Notes zoom and pan changes while recording, so the saved video follows them.
+    private func trackCrop() {
+        guard let started = recording?.started, recordingPlan != nil else { return }
+        let crop = visibleCrop
+        if crop != recordingPlan!.crops.last?.crop { recordingPlan!.crops.append((Date().timeIntervalSince(started), crop)) }
     }
     /// Erases the rows the phone can occupy. Needed where images are cell content (iTerm2).
     private func eraseScreenText() {
@@ -362,7 +375,8 @@ final class PhoneViewer {
         zoom = min(4, max(0.3, value))
         if resetPan || zoom <= 1 { pan = (0.5, 0.5) }
         relayout()
-        record("zoom \(Int((zoom * 100).rounded()))%", ok: true)
+        let zoomedIn = layout.map { $0.viewport.overflowsX || $0.viewport.overflowsY } ?? false
+        record("Zoom \(Int((zoom * 100).rounded()))%" + (zoomedIn ? " · scroll to move around, ⌥ scroll for the app · captures show this view" : ""), ok: true)
     }
 
     // MARK: Chrome
@@ -725,6 +739,10 @@ final class PhoneViewer {
         return folder.appendingPathComponent("terminal-phone \(phone.name) \(kind) \(stamp).\(ext)")
     }
     private func screenshot() {
+        // Zoomed in: save what is in view, in the frame, on a transparent background.
+        if let crop = visibleCrop {
+            capture(MediaStyle(frame: finish, background: .transparent, crop: crop), kind: "zoomed screenshot"); return
+        }
         let url = outputURL("screenshot", "png"), udid = phone.udid, device = phone.isDevice ? phone : nil
         Task { @MainActor in
             do {
@@ -736,47 +754,66 @@ final class PhoneViewer {
         }
     }
     /// Records the screen, and the input during it as a flow that `terminal-phone replay` runs again.
-    /// An App Store preview records to a temporary movie that is composed and encoded when it stops.
+    /// Everything records to a temporary movie first: an App Store preview, or a recording made
+    /// while zoomed in, is composed when it stops; anything else is moved to the Desktop as it is.
     private func startRecording(appStore: Bool = false) {
-        guard recording == nil, !startingRecording else { return }
+        guard recording == nil, !startingRecording, mediaTask == nil else {
+            if mediaTask != nil { record("Still saving the last recording…", ok: false) }
+            return
+        }
         startingRecording = true
-        let url = appStore ? FileManager.default.temporaryDirectory.appendingPathComponent("terminal-phone-\(UUID().uuidString).mov") : outputURL("recording", "mov")
-        let phone = phone, style = appStore ? studioSettings.style(finish: finish) : nil, points = Double(min(screen.width, screen.height))
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("terminal-phone-\(UUID().uuidString).mov")
+        let crop = visibleCrop
+        let plan = RecordingPlan(appStore: appStore, style: appStore ? studioSettings.style(finish: finish, crop: crop) : nil,
+                                 points: Double(min(screen.width, screen.height)), crops: [(0, crop)])
+        let phone = phone
         Task { @MainActor in
             defer { startingRecording = false }
             do {
                 let started = try await PhoneRecording.start(cli: cli, phone: phone, movie: url)
                 guard phone.name == self.phone.name, !quit else { started.stop(); return }
-                recording = started; recordingStyle = style.map { ($0, points) }
-                record(appStore ? "Recording the app preview — App Store wants 15–30 s" : "recording…", ok: true)
+                recording = started; recordingPlan = plan
+                record(appStore ? "Recording the app preview — App Store wants 15–30 s" : crop != nil ? "Recording this zoomed view…" : "recording…", ok: true)
             } catch { record("Recording failed: \(error.localizedDescription)", ok: false) }
         }
     }
     private func stopRecording(wait: Bool) {
-        guard let current = recording else { return }
-        recording = nil
-        guard let (style, points) = recordingStyle else {
-            let flow = current.stop()
-            if !wait { record("saved \(current.movie.lastPathComponent)\(flow == nil ? "" : " + flow")", ok: true) }
+        guard let current = recording, let plan = recordingPlan else { return }
+        recording = nil; recordingPlan = nil
+        let seconds = Date().timeIntervalSince(current.started), movie = current.movie
+        let zoomed = plan.crops.contains { $0.crop != nil }
+        // A plain recording that never zoomed is kept exactly as recorded.
+        guard plan.appStore || zoomed else {
+            let output = outputURL("recording", "mov")
+            let flow = current.stop(flowNextTo: output)
+            do { try FileManager.default.moveItem(at: movie, to: output); lastMedia = output; record("saved \(output.lastPathComponent)\(flow == nil ? "" : " + flow")", ok: true) }
+            catch { record("Recording failed: \(error.localizedDescription)", ok: false) }
             return
         }
-        recordingStyle = nil
-        let output = outputURL("App Store preview", "mp4"), seconds = Date().timeIntervalSince(current.started)
+        // Zoomed plain recordings keep the frame and a transparent background, so they drop into
+        // any edit; the first zoomed view sets the clip's size.
+        let firstCrop = plan.crops.first { $0.crop != nil }?.crop
+        let style = plan.style ?? MediaStyle(frame: finish, background: .transparent, crop: firstCrop)
+        let output = !plan.appStore ? outputURL("zoomed recording", "mov")
+            : style.size == .native ? outputURL("video", style.transparent ? "mov" : "mp4") : outputURL("App Store preview", "mp4")
         _ = current.stop(flowNextTo: output)
-        record("Encoding the app preview…", ok: true)
-        let movie = current.movie
+        record(plan.appStore ? "Encoding the app preview…" : "Saving the zoomed recording…", ok: true)
+        var appStoreSize = false
+        if case .appStore = style.size { appStoreSize = true }
+        let crops = plan.crops, points = plan.points, appStore = appStoreSize
         mediaTask = Task { @MainActor in
             defer { try? FileManager.default.removeItem(at: movie); mediaTask = nil; previousChrome = "" }
             do {
                 // Encoding takes a few seconds; keep the viewer responsive meanwhile.
                 let result = try await Task.detached {
-                    try await MediaVideoExport.export(movie, to: output, style: style, pointWidth: points, recordedSeconds: seconds, maxSeconds: AppPreviewRules.maximumSeconds)
+                    try await MediaVideoExport.export(movie, to: output, style: style, pointWidth: points, recordedSeconds: seconds,
+                                                      maxSeconds: appStore ? AppPreviewRules.maximumSeconds : nil, crops: crops)
                 }.value
                 lastMedia = output
-                if result.seconds < AppPreviewRules.minimumSeconds {
+                if appStore && result.seconds < AppPreviewRules.minimumSeconds {
                     record("Saved \(output.lastPathComponent), but it is \(Int(result.seconds)) s — App Store needs 15–30 s", ok: false)
                 } else { record("Saved \(output.lastPathComponent) · \(result.size.width)×\(result.size.height)", ok: true) }
-            } catch { record("App preview failed: \(error.localizedDescription)", ok: false) }
+            } catch { record("Saving the video failed: \(error.localizedDescription)", ok: false) }
         }
     }
     private func refreshAppearance() {
@@ -935,13 +972,16 @@ final class PhoneViewer {
         if pressedChrome { if released { pressedChrome = false }; return }
         let viewport = layout.viewport
         if wheel {
-            // Shift+wheel and sideways wheels pan a zoomed phone; a plain wheel scrolls the app.
-            let horizontal = button & 3 >= 2
-            if horizontal || (shift && (viewport.overflowsX || viewport.overflowsY)) {
-                let step = (button & 1 == 0 ? -0.08 : 0.08)
-                if horizontal || (shift && !viewport.overflowsY) { pan.x = min(1, max(0, pan.x + step)) } else { pan.y = min(1, max(0, pan.y + step)) }
+            // A zoomed-in phone scrolls around with the wheel (sideways wheels and Shift+wheel move
+            // across); ⌥ (Option) + wheel, or any wheel when the whole phone shows, scrolls the app.
+            let horizontal = button & 3 >= 2, option = button & 8 != 0
+            if (viewport.overflowsX || viewport.overflowsY) && !option {
+                let step = viewport.panStep(), sign = button & 1 == 0 ? -1.0 : 1.0
+                if (horizontal || shift || !viewport.overflowsY) && viewport.overflowsX { pan.x = min(1, max(0, pan.x + sign * step.x)) }
+                else if viewport.overflowsY { pan.y = min(1, max(0, pan.y + sign * step.y)) }
                 relayout(); return
             }
+            if horizontal { return }
             guard let point = viewport.point(column: col, row: row) else { return }
             if wheelSteps == 0 { wheelAt = Date() }
             wheelSteps = max(-6, min(6, wheelSteps + (button & 1 == 0 ? 1 : -1))); wheelPoint = point
@@ -1154,15 +1194,18 @@ extension PhoneViewer {
         let s = studioSettings, auto = AppStoreDisplay.auto(for: nativeSize)
         let display = s.chosenDisplay ?? auto
         let shot = display.screenshotSize(for: nativeSize), preview = display.previewSize(landscape: nativeSize.landscape)
+        let zoomNote: [Span] = visibleCrop == nil ? [] : [Span("zoomed · ", Theme.accent)]
         func choice(_ text: String, _ style: String = Theme.text) -> [Span] { [Span("‹ ", Theme.faint), Span(text, style), Span(" ›", Theme.faint)] }
-        let ours = recordingStyle != nil, someoneElses = recording != nil && !ours
+        let ours = recordingPlan?.appStore == true, someoneElses = recording != nil && !ours
         var rows = [
-            StudioRow(item: .screenshot, name: "Take screenshot", detail: [Span("\(shot.width)×\(shot.height) PNG", Theme.muted)], enabled: true),
-            StudioRow(item: .record, name: ours ? "Stop and save preview" : "Record app preview",
-                      detail: ours ? [Span(recordingTime, Theme.red)] : someoneElses ? [Span("stop the other recording", Theme.faint)]
-                                   : [Span("\(preview.width)×\(preview.height) · 15–30 s", Theme.muted)],
+            StudioRow(item: .screenshot, name: "Take screenshot",
+                      detail: zoomNote + [Span(s.asShown ? "PNG" : "\(shot.width)×\(shot.height) PNG", Theme.muted)], enabled: true),
+            StudioRow(item: .record, name: ours ? "Stop and save" : s.asShown ? "Record video" : "Record app preview",
+                      detail: ours ? [Span(recordingTime(appStore: !s.asShown), Theme.red)] : someoneElses ? [Span("stop the other recording", Theme.faint)]
+                                   : zoomNote + [Span(s.asShown ? (s.background == "transparent" ? "MOV with alpha" : "MP4") : "\(preview.width)×\(preview.height) · 15–30 s", Theme.muted)],
                       enabled: !someoneElses && mediaTask == nil),
-            StudioRow(item: .size, name: "Size", detail: choice(s.chosenDisplay == nil ? "Auto · \(auto.rawValue)\"" : display.isPad ? "iPad \(display.rawValue.dropFirst(5))\"" : "\(display.rawValue)\""), enabled: true),
+            StudioRow(item: .size, name: "Size", detail: choice(s.asShown ? "As shown" : s.chosenDisplay == nil ? "Auto · \(auto.rawValue)\""
+                                                                : display.isPad ? "iPad \(display.rawValue.dropFirst(5))\"" : "\(display.rawValue)\""), enabled: true),
             StudioRow(item: .frame, name: "Device frame", detail: s.frame ? choice(finish.displayName) : [Span("Off", Theme.muted)], enabled: true),
             StudioRow(item: .background, name: "Background",
                       detail: choice(s.background.map { $0.prefix(1).uppercased() + $0.dropFirst() } ?? (s.frame || s.caption != nil ? "Light (auto)" : "None")), enabled: true),
@@ -1176,9 +1219,10 @@ extension PhoneViewer {
         rows.append(StudioRow(item: .reveal, name: "Show in Finder", detail: [Span(lastMedia?.lastPathComponent ?? "nothing saved yet", Theme.faint)], enabled: lastMedia != nil))
         return rows
     }
-    private var recordingTime: String {
+    private func recordingTime(appStore: Bool) -> String {
         let seconds = Int(Date().timeIntervalSince(recording?.started ?? Date()))
-        return String(format: "%d:%02d", seconds / 60, seconds % 60) + (seconds < 15 ? " · keep going" : seconds > 30 ? " · trims to 30 s" : " · good length")
+        let time = String(format: "%d:%02d", seconds / 60, seconds % 60)
+        return appStore ? time + (seconds < 15 ? " · keep going" : seconds > 30 ? " · trims to 30 s" : " · good length") : time
     }
 
     fileprivate func openStudio() {
@@ -1209,9 +1253,10 @@ extension PhoneViewer {
         case .record:
             guard step == 0 else { return }
             guard row.enabled else { record("Stop the current recording first", ok: false); return }
-            recordingStyle != nil ? stopRecording(wait: false) : startRecording(appStore: true)
+            recordingPlan?.appStore == true ? stopRecording(wait: false) : startRecording(appStore: true)
         case .size:
-            studioSettings.display = AppStoreSettings.step(AppStoreSettings.displays, from: studioSettings.display, by: step == 0 ? 1 : step); saveStudio()
+            studioSettings.display = AppStoreSettings.step(AppStoreSettings.displays, from: studioSettings.display, by: step == 0 ? 1 : step)
+            studioSettings.normalize(); saveStudio()
         case .frame:
             if step == 0 || !studioSettings.frame { studioSettings.frame.toggle() }
             else {
@@ -1221,7 +1266,8 @@ extension PhoneViewer {
             }
             saveStudio()
         case .background:
-            studioSettings.background = AppStoreSettings.step(AppStoreSettings.backgrounds, from: studioSettings.background, by: step == 0 ? 1 : step); saveStudio()
+            studioSettings.background = AppStoreSettings.step(AppStoreSettings.backgrounds(asShown: studioSettings.asShown), from: studioSettings.background, by: step == 0 ? 1 : step)
+            saveStudio()
         case .caption:
             if step == 0 { captionDraft = studioSettings.caption ?? "" }
         case .statusBar:
@@ -1239,14 +1285,26 @@ extension PhoneViewer {
     }
 
     private func appStoreScreenshot() {
-        let name = phone.name, style = studioSettings.style(finish: finish)
-        record("Taking the App Store screenshot…", ok: true)
+        capture(studioSettings.style(finish: finish, crop: visibleCrop), kind: "screenshot")
+    }
+    /// Takes a full-resolution screenshot and saves it composed in `style`, at an App Store size
+    /// or the phone's own (cropped to the zoomed view when `style.crop` is set).
+    fileprivate func capture(_ style: MediaStyle, kind: String) {
+        let name = phone.name
         Task { @MainActor in
             do {
                 let (image, scale) = try await cli.nativeScreenshot(name)
-                let (_, saved) = try cli.writeScreenshot(image, scale: scale, style: style, to: { self.outputURL("App Store \($0.rawValue)", "png") })
-                lastMedia = saved.url; previousChrome = ""
-                record("Saved \(saved.url.lastPathComponent) · \(saved.canvas.width)×\(saved.canvas.height)", ok: true)
+                let url: URL, size: PixelSize
+                if case .appStore = style.size {
+                    let (_, saved) = try cli.writeScreenshot(image, scale: scale, style: style, to: { self.outputURL("App Store \($0.rawValue)", "png") })
+                    url = saved.url; size = saved.canvas
+                } else {
+                    let composer = try MediaComposer(style: style, source: PixelSize(image.width, image.height), scale: scale, canvas: nil)
+                    url = outputURL(kind, "png"); size = composer.layout.canvas
+                    try MediaComposer.write(try composer.image(image), to: url)
+                }
+                lastMedia = url; previousChrome = ""
+                record("Saved \(url.lastPathComponent) · \(size.width)×\(size.height)", ok: true)
             } catch { record("Screenshot failed: \(error.localizedDescription)", ok: false) }
         }
     }

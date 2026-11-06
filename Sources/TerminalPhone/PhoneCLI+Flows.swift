@@ -40,9 +40,10 @@ extension PhoneCLI {
         let name = try named(args.positionals), saved = try store.load(name)
         if !saved.isDevice { _ = try await phone(name) }
         let style = try mediaStyle(args, phone: name, appStore: false)
-        let output = args.options["output"].map(expandedURL) ?? mediaURL(name, "recording", style.plain ? "mov" : "mp4")
+        let output = args.options["output"].map(expandedURL) ?? mediaURL(name, "recording", style.plain || style.transparent ? "mov" : "mp4")
         let ext = output.pathExtension.lowercased(), gif = ext == "gif"
         guard gif || ["mov", "mp4", "m4v"].contains(ext) else { throw Failure("--output must end in .mov, .mp4, .m4v or .gif") }
+        if style.transparent, ext != "mov" { throw Failure("A transparent background needs a .mov file (HEVC with alpha)") }
         let duration = try args.options["duration"].map { try number($0, fallback: 0, range: 1...3600, name: "duration") }
         // Plain .mov recordings are written directly; everything else goes through the composer.
         let direct = style.plain && ext == "mov"

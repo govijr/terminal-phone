@@ -42,6 +42,7 @@ If the viewer in the new pane fails, the pane stays open with the error until yo
 
 - Click to tap; type normally; drag to swipe; mouse wheel to scroll.
 - Home and Lock are in the toolbar. Ctrl+B sends Home; Ctrl+L locks.
+- Zoom with − and + in the header. Once zoomed in, the scroll wheel moves around the phone (⌥ + scroll scrolls the app; dragging still swipes), and Screenshot and Record save just what is in view, in the device frame, on a transparent background: a PNG, or a `.mov` with an alpha channel (HEVC) that follows you as you scroll.
 - Ctrl+A (or the ✦ App Store button) opens the App Store panel: take a screenshot or record an app preview at App Store Connect's sizes, and pick the size, device frame, background and caption with ←→ and Return. The choices are remembered and files go to the Desktop.
 - Ctrl+P switches phones; Ctrl+S saves a screenshot; Ctrl+R toggles recording (simulators and real iPhones). A recording saves a movie and, when you tapped or typed, a `.flow.yaml` beside it that `terminal-phone replay` runs again.
 - Ctrl+F or the Frame button opens the frame picker: ↑/↓ or a click previews each finish on the phone, Return keeps it, Esc restores the previous one. `--frame NAME` on `view` or `up` sets it directly: graphite, black, silver, white, gold, orange, red, pink, yellow, green, blue or purple (display names such as "Cosmic Orange" work too). The choice is saved per phone in `configuration.json`.
@@ -185,6 +186,7 @@ Output always meets App Store Connect's rules: screenshots are PNG or JPEG at an
 | `--display` | `auto`, `6.9`, `6.5`, `6.3`, `6.1`, `5.5`, `4.7`, `ipad-13`, `ipad-11` |
 | `--frame`, `--finish COLOUR` | draw the device frame; the colour defaults to the one picked in the viewer (Ctrl+F) |
 | `--background` | a preset (`light`, `dark`, `midnight`, `sunset`, `ocean`, `mint`, `grape`, `white`, `black`), a colour such as `'#1e90ff'`, two colours for a top-to-bottom gradient such as `'#0b1d3a,#3a6df0'`, or an image file |
+| | `transparent` too, for `record` (a `.mov` with an alpha channel) and the viewer's *As shown* size; App Store Connect rejects transparency, so `appstore` refuses it |
 | `--caption`, `--caption-color` | bold text above the phone; `\n` breaks a line. Black or white is chosen to suit the background |
 | `--points` | for `export`: the screen's width in points, if the frame looks the wrong size (guessed from the pixels otherwise) |
 

@@ -6,94 +6,139 @@ import TerminalMacCore
 import TerminalPhoneCore
 import UniformTypeIdentifiers
 
-/// Draws a phone screen onto an opaque canvas: optionally inside the device frame, over a
-/// background, under a caption. Everything but the screen is drawn once, so video frames are cheap.
+/// Draws a phone screen onto a canvas: optionally inside the device frame, over a background,
+/// under a caption, and cropped to part of the device (what a zoomed-in viewer shows).
+/// The background and caption are drawn once, so video frames are cheap.
 final class MediaComposer {
     let layout: MediaLayout
-    /// Where the screen itself lands, in canvas pixels with a top-left origin.
-    let screenRect: MediaRect
-    private let radius: Double
+    /// The canvas keeps an alpha channel only when a transparent background was asked for.
+    let transparent: Bool
+    private let style: MediaStyle
+    private let landscape: Bool
+    /// The portrait device frame in points, when the frame is drawn.
+    private let device: DeviceFrame?
+    /// Everything that can show, in pixels: the framed device, or the bare screen.
+    private let content: (width: Double, height: Double)
     private let base: CGImage
+    private let body: CGImage?
     private static let space = CGColorSpace(name: CGColorSpace.sRGB)!
 
     /// `source` is the screen in pixels; `scale` its pixels per point, which sizes the frame.
-    /// `canvas` nil keeps the natural size.
+    /// `canvas` nil keeps the natural size (of the crop, when there is one).
     init(style: MediaStyle, source: PixelSize, scale: Double, canvas: PixelSize?) throws {
-        let landscape = source.landscape
+        self.style = style
+        landscape = source.landscape
+        transparent = style.transparent
         var content = (width: Double(source.width), height: Double(source.height))
-        var frame: DeviceFrame?
+        var device: DeviceFrame?
         if let finish = style.frame {
             let portrait = source.oriented(landscape: false)
-            let device = DeviceFrame(screenWidth: Int((Double(portrait.width) / scale).rounded()), screenHeight: Int((Double(portrait.height) / scale).rounded()), finish: finish)
-            content = landscape ? (device.height * scale, device.width * scale) : (device.width * scale, device.height * scale)
-            frame = device
+            let frame = DeviceFrame(screenWidth: Int((Double(portrait.width) / scale).rounded()), screenHeight: Int((Double(portrait.height) / scale).rounded()), finish: finish)
+            content = landscape ? (frame.height * scale, frame.width * scale) : (frame.width * scale, frame.height * scale)
+            device = frame
         }
-        layout = MediaLayout.make(content: content, canvas: canvas, decorated: style.decorated, caption: style.caption != nil)
-        let c = layout.content
-        if let frame {
-            // Fractions of the portrait body; a landscape phone is the body turned clockwise.
-            let fx = frame.screenX / frame.width, fy = frame.screenY / frame.height
-            let fw = frame.screenWidth / frame.width, fh = frame.screenHeight / frame.height
-            screenRect = landscape
-                ? MediaRect(x: c.x + (1 - fy - fh) * c.width, y: c.y + fx * c.height, width: fh * c.width, height: fw * c.height)
-                : MediaRect(x: c.x + fx * c.width, y: c.y + fy * c.height, width: fw * c.width, height: fh * c.height)
-        } else { screenRect = c }
-        radius = layout.fills ? 0 : 0.137 * min(screenRect.width, screenRect.height)
+        self.content = content; self.device = device
+        // The crop is measured on the framed device, so work it out against that frame even when
+        // only the screen is drawn.
+        let portrait = source.oriented(landscape: false)
+        let reference = device ?? DeviceFrame(screenWidth: Int((Double(portrait.width) / scale).rounded()), screenHeight: Int((Double(portrait.height) / scale).rounded()))
+        cropReference = reference
+        let crop = Self.contentCrop(style.crop, framed: device != nil, landscape: landscape, reference: reference)
+        layout = MediaLayout.make(content: (content.width * crop.width, content.height * crop.height), canvas: canvas,
+                                  decorated: style.inset, caption: style.caption != nil)
 
-        guard let context = Self.context(layout.canvas) else { throw Failure("Cannot allocate a \(layout.canvas) canvas") }
+        guard let context = Self.context(layout.canvas, alpha: transparent) else { throw Failure("Cannot allocate a \(layout.canvas) canvas") }
         let height = Double(layout.canvas.height)
         let full = CGRect(x: 0, y: 0, width: layout.canvas.width, height: layout.canvas.height)
-        context.setFillColor(.black); context.fill(full)
+        if transparent { context.clear(full) } else { context.setFillColor(.black); context.fill(full) }
         if let background = style.resolvedBackground { try Self.draw(background, in: context, rect: full) }
         if let caption = style.caption, let box = layout.caption {
             let color = style.captionColor ?? (style.resolvedBackground?.topColor.map { MediaBackground.isLight($0) ? 0x111114 : 0xffffff } ?? 0xffffff)
             Self.draw(caption, color: color, in: context, rect: CGRect(x: box.x, y: height - box.y - box.height, width: box.width, height: box.height))
         }
-        if let frame {
-            let pixelsPerPoint = (landscape ? c.height : c.width) / frame.width
-            let black = Self.context(PixelSize(1, 1)).flatMap { $0.setFillColor(.black); $0.fill(CGRect(x: 0, y: 0, width: 1, height: 1)); return $0.makeImage() }!
+        guard let base = context.makeImage() else { throw Failure("Cannot draw the background") }
+        self.base = base
+        if let device {
+            // Drawn at the screen's own density; each frame scales it into place.
+            let black = Self.context(PixelSize(1, 1), alpha: false).flatMap { $0.setFillColor(.black); $0.fill(CGRect(x: 0, y: 0, width: 1, height: 1)); return $0.makeImage() }!
             let renderer = PhoneRenderer(writer: TerminalWriter(), transport: .blocks)
-            guard var body = renderer.framed(black, finish: frame.finish, width: Int(frame.screenWidth), height: Int(frame.screenHeight), pixelsPerPoint: pixelsPerPoint) else {
+            guard var body = renderer.framed(black, finish: device.finish, width: Int(device.screenWidth), height: Int(device.screenHeight), pixelsPerPoint: scale) else {
                 throw Failure("Cannot draw the device frame")
             }
             if landscape, let turned = Self.clockwise(body) { body = turned }
-            context.draw(body, in: CGRect(x: c.x, y: height - c.y - c.height, width: c.width, height: c.height))
-        }
-        guard let base = context.makeImage() else { throw Failure("Cannot draw the background") }
-        self.base = base
+            self.body = body
+        } else { body = nil }
+    }
+    private let cropReference: DeviceFrame
+
+    /// A device crop as fractions of what is drawn. Landscape phones are never cropped.
+    private static func contentCrop(_ crop: MediaRect?, framed: Bool, landscape: Bool, reference: DeviceFrame) -> MediaRect {
+        guard let crop, !landscape else { return MediaCrop.whole }
+        return framed ? crop : MediaCrop.screen(crop, in: reference)
     }
 
-    /// Draws the whole picture with `screen` in place.
-    func draw(_ screen: CGImage, into context: CGContext) {
+    /// Where things land for one crop, in canvas pixels with a top-left origin: the visible
+    /// part, the whole device (which may reach past the canvas), and the screen within it.
+    private func geometry(_ crop: MediaRect?) -> (visible: MediaRect, device: MediaRect, screen: MediaRect) {
+        let c = Self.contentCrop(crop, framed: device != nil, landscape: landscape, reference: cropReference)
+        let placed = crop == style.crop ? layout.content
+            : MediaLayout.make(content: (content.width * c.width, content.height * c.height), canvas: layout.canvas, decorated: style.inset, caption: style.caption != nil).content
+        let width = placed.width / c.width, height = placed.height / c.height
+        let whole = MediaRect(x: placed.x - c.x * width, y: placed.y - c.y * height, width: width, height: height)
+        guard let frame = device else { return (placed, whole, whole) }
+        // Fractions of the portrait body; a landscape phone is the body turned clockwise.
+        let fx = frame.screenX / frame.width, fy = frame.screenY / frame.height
+        let fw = frame.screenWidth / frame.width, fh = frame.screenHeight / frame.height
+        let screen = landscape
+            ? MediaRect(x: whole.x + (1 - fy - fh) * whole.width, y: whole.y + fx * whole.height, width: fh * whole.width, height: fw * whole.height)
+            : MediaRect(x: whole.x + fx * whole.width, y: whole.y + fy * whole.height, width: fw * whole.width, height: fh * whole.height)
+        return (placed, whole, screen)
+    }
+
+    /// Draws the whole picture with `screen` in place, cropped to `crop` (the style's by default).
+    func draw(_ screen: CGImage, crop: MediaRect?? = nil, into context: CGContext) {
+        let g = geometry(crop ?? style.crop)
         let height = Double(layout.canvas.height)
+        func cg(_ r: MediaRect) -> CGRect { CGRect(x: r.x, y: height - r.y - r.height, width: r.width, height: r.height) }
+        let canvas = CGRect(x: 0, y: 0, width: layout.canvas.width, height: layout.canvas.height)
         context.interpolationQuality = .high
-        context.draw(base, in: CGRect(x: 0, y: 0, width: layout.canvas.width, height: layout.canvas.height))
-        let rect = CGRect(x: screenRect.x, y: height - screenRect.y - screenRect.height, width: screenRect.width, height: screenRect.height)
+        if transparent { context.clear(canvas) }
+        context.draw(base, in: canvas)
         context.saveGState()
-        if radius > 0 { context.addPath(CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil)); context.clip() }
+        context.clip(to: cg(g.visible).intersection(canvas))
+        if let body { context.draw(body, in: cg(g.device)) }
+        let rect = cg(g.screen)
+        // The screen's corners are rounded wherever they can be seen against something.
+        let rounded = device != nil || (style.background != nil && !layout.fills)
+        if rounded {
+            let radius = 0.137 * min(rect.width, rect.height)
+            context.addPath(CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil)); context.clip()
+        }
         context.draw(screen, in: rect)
         context.restoreGState()
     }
 
     func image(_ screen: CGImage) throws -> CGImage {
-        guard let context = Self.context(layout.canvas) else { throw Failure("Cannot allocate a \(layout.canvas) canvas") }
+        guard let context = Self.context(layout.canvas, alpha: transparent) else { throw Failure("Cannot allocate a \(layout.canvas) canvas") }
         draw(screen, into: context)
         guard let image = context.makeImage() else { throw Failure("Cannot compose the screenshot") }
         return image
     }
 
-    /// PNG or JPEG by extension, always without an alpha channel.
+    /// PNG or JPEG by extension. Only a transparent composition has an alpha channel, and JPEG cannot hold one.
     static func write(_ image: CGImage, to url: URL) throws {
         let jpeg = ["jpg", "jpeg"].contains(url.pathExtension.lowercased())
+        if jpeg, image.alphaInfo != .noneSkipLast, image.alphaInfo != .none { throw Failure("A transparent background needs a .png file") }
         guard let destination = CGImageDestinationCreateWithURL(url as CFURL, (jpeg ? UTType.jpeg : UTType.png).identifier as CFString, 1, nil) else { throw Failure("Cannot write \(url.path)") }
         CGImageDestinationAddImage(destination, image, (jpeg ? [kCGImageDestinationLossyCompressionQuality: 0.95] : [:]) as CFDictionary)
         guard CGImageDestinationFinalize(destination) else { throw Failure("Cannot write \(url.path)") }
     }
 
-    /// Opaque RGB: App Store Connect rejects images with an alpha channel.
-    static func context(_ size: PixelSize) -> CGContext? {
+    /// Opaque RGB unless `alpha`: App Store Connect rejects images with an alpha channel.
+    static func context(_ size: PixelSize, alpha: Bool) -> CGContext? {
+        let info = alpha ? CGImageAlphaInfo.premultipliedLast : CGImageAlphaInfo.noneSkipLast
         let context = CGContext(data: nil, width: size.width, height: size.height, bitsPerComponent: 8, bytesPerRow: 0, space: space,
-                                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)
+                                bitmapInfo: info.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)
         context?.interpolationQuality = .high
         return context
     }
@@ -104,6 +149,7 @@ final class MediaComposer {
 
     private static func draw(_ background: MediaBackground, in context: CGContext, rect: CGRect) throws {
         switch background {
+        case .transparent: break
         case .solid(let color): context.setFillColor(cg(color)); context.fill(rect)
         case .gradient(let top, let bottom):
             guard let gradient = CGGradient(colorsSpace: space, colors: [cg(top), cg(bottom)] as CFArray, locations: [0, 1]) else { return }
@@ -168,7 +214,11 @@ enum MediaVideoExport {
     /// scale is guessed from the pixels.
     /// `recordedSeconds` is how long the recording ran: simulators stop writing frames while the
     /// screen is still, so the movie can end early and its last frame is held to that length.
-    static func export(_ movie: URL, to output: URL, style: MediaStyle, pointWidth: Double?, recordedSeconds: Double? = nil, maxSeconds: Double? = nil) async throws -> Result {
+    /// `crops` follows a zoomed viewer as it pans: each crop applies from its time (seconds into
+    /// the recording) until the next; before the first, `style.crop` applies.
+    static func export(_ movie: URL, to output: URL, style: MediaStyle, pointWidth: Double?, recordedSeconds: Double? = nil, maxSeconds: Double? = nil,
+                       crops: [(time: Double, crop: MediaRect?)] = []) async throws -> Result {
+        if style.transparent, output.pathExtension.lowercased() != "mov" { throw Failure("A transparent background needs a .mov file (HEVC with alpha)") }
         let asset = AVURLAsset(url: movie)
         guard let track = try await asset.loadTracks(withMediaType: .video).first else { throw Failure("\(movie.lastPathComponent) has no video") }
         let natural = try await track.load(.naturalSize)
@@ -199,12 +249,14 @@ enum MediaVideoExport {
         let writer = try AVAssetWriter(outputURL: output, fileType: type)
         let fps = AppPreviewRules.framesPerSecond
         let bitRate = appStore ? AppPreviewRules.bitRate : max(6_000_000, min(40_000_000, size.width * size.height * fps / 7))
+        // Transparency needs HEVC with alpha (QuickTime, Safari, Final Cut, Keynote); everything else is H.264.
+        var compression: [String: Any] = [AVVideoAverageBitRateKey: bitRate, AVVideoExpectedSourceFrameRateKey: fps, AVVideoMaxKeyFrameIntervalKey: fps]
+        if !style.transparent { compression[AVVideoProfileLevelKey] = appStore ? AVVideoProfileLevelH264High40 : AVVideoProfileLevelH264HighAutoLevel }
         let video = AVAssetWriterInput(mediaType: .video, outputSettings: [
-            AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: size.width, AVVideoHeightKey: size.height,
+            AVVideoCodecKey: style.transparent ? AVVideoCodecType.hevcWithAlpha : AVVideoCodecType.h264, AVVideoWidthKey: size.width, AVVideoHeightKey: size.height,
             AVVideoColorPropertiesKey: [AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2, AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
                                         AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2],
-            AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: bitRate, AVVideoExpectedSourceFrameRateKey: fps, AVVideoMaxKeyFrameIntervalKey: fps,
-                                              AVVideoProfileLevelKey: appStore ? AVVideoProfileLevelH264High40 : AVVideoProfileLevelH264HighAutoLevel]
+            AVVideoCompressionPropertiesKey: compression
         ])
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: video, sourcePixelBufferAttributes: [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA, kCVPixelBufferWidthKey as String: size.width, kCVPixelBufferHeightKey as String: size.height])
@@ -224,6 +276,7 @@ enum MediaVideoExport {
         var next = frames.copyNextSampleBuffer()
         let start = next.map { CMSampleBufferGetPresentationTimeStamp($0).seconds } ?? 0
         var current: CGImage?, changed = true, last: CVPixelBuffer?
+        var crop: MediaRect? = style.crop, cropIndex = 0
         var index = 0, audioFrames = 0, videoDone = false, audioDone = audio == nil
         let totalAudio = Int(Double(count) / Double(fps) * Double(SilentAudio.rate))
         var progressAt = Date()
@@ -236,8 +289,12 @@ enum MediaVideoExport {
                         if let image = image(sample) { current = image; changed = true }
                         next = frames.copyNextSampleBuffer()
                     }
+                    while cropIndex < crops.count, crops[cropIndex].time <= time + 0.0005 {
+                        if crops[cropIndex].crop != crop { crop = crops[cropIndex].crop; changed = true }
+                        cropIndex += 1
+                    }
                     if changed || last == nil {
-                        guard let pool = adaptor.pixelBufferPool, let buffer = render(current, composer: composer, pool: pool) else { throw Failure("Cannot allocate video frames") }
+                        guard let pool = adaptor.pixelBufferPool, let buffer = render(current, crop: crop, composer: composer, pool: pool) else { throw Failure("Cannot allocate video frames") }
                         last = buffer; changed = false
                     }
                     guard adaptor.append(last!, withPresentationTime: CMTime(value: CMTimeValue(index), timescale: CMTimeScale(fps))) else {
@@ -284,14 +341,14 @@ enum MediaVideoExport {
                          bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)?.makeImage()
     }
 
-    private static func render(_ screen: CGImage?, composer: MediaComposer, pool: CVPixelBufferPool) -> CVPixelBuffer? {
+    private static func render(_ screen: CGImage?, crop: MediaRect?, composer: MediaComposer, pool: CVPixelBufferPool) -> CVPixelBuffer? {
         var buffer: CVPixelBuffer?
         guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &buffer) == kCVReturnSuccess, let buffer else { return nil }
         CVPixelBufferLockBaseAddress(buffer, []); defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
         guard let context = CGContext(data: CVPixelBufferGetBaseAddress(buffer), width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer), bitsPerComponent: 8,
                                       bytesPerRow: CVPixelBufferGetBytesPerRow(buffer), space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                      bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else { return nil }
-        if let screen { composer.draw(screen, into: context) }
+                                      bitmapInfo: (composer.transparent ? CGImageAlphaInfo.premultipliedFirst : .noneSkipFirst).rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else { return nil }
+        if let screen { composer.draw(screen, crop: .some(crop), into: context) }
         else { context.setFillColor(.black); context.fill(CGRect(x: 0, y: 0, width: composer.layout.canvas.width, height: composer.layout.canvas.height)) }
         return buffer
     }

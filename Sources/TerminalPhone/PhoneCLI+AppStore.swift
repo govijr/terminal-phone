@@ -35,6 +35,7 @@ extension PhoneCLI {
             guard let background = MediaBackground.parse(raw) else {
                 throw Failure("--background must be a colour like '#1e90ff', two colours for a gradient like '#0b1d3a,#3a6df0', an image file, or one of: \(MediaBackground.presetNames)")
             }
+            if appStore, background == .transparent { throw Failure("App Store Connect rejects transparent images and videos; pick a colour, or use terminal-phone record --background transparent") }
             style.background = background
         }
         if let caption = args.options["caption"] {

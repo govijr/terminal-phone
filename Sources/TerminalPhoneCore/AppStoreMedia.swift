@@ -137,8 +137,10 @@ public struct MediaLayout: Equatable, Sendable {
     }
 }
 
-/// What is drawn behind the phone. Output is always opaque: App Store Connect rejects alpha.
+/// What is drawn behind the phone. App Store output is always opaque (App Store Connect
+/// rejects alpha); `transparent` is for other uses, as PNG or as a movie with an alpha channel.
 public enum MediaBackground: Equatable, Sendable {
+    case transparent
     case solid(UInt32)
     /// Top to bottom.
     case gradient(UInt32, UInt32)
@@ -148,7 +150,8 @@ public enum MediaBackground: Equatable, Sendable {
         ("light", .gradient(0xf5f5f7, 0xe2e2e8)), ("dark", .gradient(0x1c1c1e, 0x000000)),
         ("midnight", .gradient(0x0b1d3a, 0x3a6df0)), ("sunset", .gradient(0xff7a59, 0xc2185b)),
         ("ocean", .gradient(0x00c6fb, 0x005bea)), ("mint", .gradient(0xd4fc79, 0x96e6a1)),
-        ("grape", .gradient(0x8e2de2, 0x4a00e0)), ("white", .solid(0xffffff)), ("black", .solid(0x000000))
+        ("grape", .gradient(0x8e2de2, 0x4a00e0)), ("white", .solid(0xffffff)), ("black", .solid(0x000000)),
+        ("transparent", .transparent)
     ]
     public static var presetNames: String { presets.map(\.name).joined(separator: ", ") }
     public static let standard = presets[0].value
@@ -173,7 +176,7 @@ public enum MediaBackground: Equatable, Sendable {
     }
     /// The colour a caption sits on, to pick black or white text.
     public var topColor: UInt32? {
-        switch self { case .solid(let c): c; case .gradient(let top, _): top; case .image: nil }
+        switch self { case .solid(let c): c; case .gradient(let top, _): top; case .image, .transparent: nil }
     }
     public static func isLight(_ color: UInt32) -> Bool {
         let r = Double(color >> 16 & 255), g = Double(color >> 8 & 255), b = Double(color & 255)
@@ -190,13 +193,22 @@ public struct MediaStyle: Equatable, Sendable {
     public var background: MediaBackground?
     public var caption: String?
     public var captionColor: UInt32?
-    public init(size: Size = .native, frame: FrameFinish? = nil, background: MediaBackground? = nil, caption: String? = nil, captionColor: UInt32? = nil) {
-        self.size = size; self.frame = frame; self.background = background; self.caption = caption; self.captionColor = captionColor
+    /// The part of the device to show, in fractions of the framed device (see `PhoneViewport.visible`);
+    /// nil shows all of it. A zoomed-in viewer passes what it shows.
+    public var crop: MediaRect?
+    public init(size: Size = .native, frame: FrameFinish? = nil, background: MediaBackground? = nil, caption: String? = nil, captionColor: UInt32? = nil,
+                crop: MediaRect? = nil) {
+        self.size = size; self.frame = frame; self.background = background; self.caption = caption; self.captionColor = captionColor; self.crop = crop
     }
     public var decorated: Bool { frame != nil || background != nil }
-    /// A frame or caption needs something opaque behind it.
-    public var resolvedBackground: MediaBackground? { background ?? (decorated || caption != nil ? .standard : nil) }
-    public var plain: Bool { size == .native && !decorated && caption == nil }
+    public var transparent: Bool { background == .transparent }
+    /// A frame or caption needs something opaque behind it, unless transparency was asked for.
+    public var resolvedBackground: MediaBackground? {
+        transparent ? nil : background ?? (decorated || caption != nil ? .standard : nil)
+    }
+    /// An opaque background shows margins around the phone; a transparent one hugs it.
+    public var inset: Bool { resolvedBackground != nil }
+    public var plain: Bool { size == .native && !decorated && caption == nil && crop == nil }
 }
 
 /// App Store app preview rules that a recording is checked against.
@@ -211,7 +223,7 @@ public enum AppPreviewRules {
 
 /// The viewer's App Store panel choices, remembered between sessions.
 public struct AppStoreSettings: Codable, Equatable, Sendable {
-    /// "auto" or an `AppStoreDisplay` raw value.
+    /// "auto", "shown" (the phone's own size, as the viewer shows it), or an `AppStoreDisplay` raw value.
     public var display: String
     public var frame: Bool
     /// A `MediaBackground` preset name; nil for none.
@@ -221,16 +233,58 @@ public struct AppStoreSettings: Codable, Equatable, Sendable {
         self.display = display; self.frame = frame; self.background = background; self.caption = caption
     }
     public var chosenDisplay: AppStoreDisplay? { AppStoreDisplay(rawValue: display) }
-    public static let displays = ["auto"] + AppStoreDisplay.allCases.map(\.rawValue)
-    public static let backgrounds: [String?] = [nil] + MediaBackground.presets.map(\.name)
+    public static let displays = ["auto"] + AppStoreDisplay.allCases.map(\.rawValue) + ["shown"]
+    public var asShown: Bool { display == "shown" }
+    /// App Store Connect rejects transparency, so it is offered only at the phone's own size.
+    public static func backgrounds(asShown: Bool) -> [String?] {
+        [nil] + MediaBackground.presets.map(\.name).filter { asShown || $0 != "transparent" }
+    }
+    /// Keeps the background valid after the size changes.
+    public mutating func normalize() {
+        if !asShown, background == "transparent" { background = nil }
+    }
 
     /// Steps through `options` from `current`, wrapping around.
     public static func step<T: Equatable>(_ options: [T], from current: T, by offset: Int) -> T {
         let index = options.firstIndex(of: current) ?? 0
         return options[((index + offset) % options.count + options.count) % options.count]
     }
-    public func style(finish: FrameFinish) -> MediaStyle {
-        MediaStyle(size: .appStore(chosenDisplay), frame: frame ? finish : nil,
-                   background: background.flatMap { name in MediaBackground.presets.first { $0.name == name }?.value }, caption: caption)
+    public func style(finish: FrameFinish, crop: MediaRect? = nil) -> MediaStyle {
+        var settings = self; settings.normalize()
+        return MediaStyle(size: asShown ? .native : .appStore(chosenDisplay), frame: frame ? finish : nil,
+                          background: settings.background.flatMap { name in MediaBackground.presets.first { $0.name == name }?.value }, caption: caption, crop: crop)
+    }
+}
+
+/// Converting a crop of the framed device into a crop of what is actually drawn.
+public enum MediaCrop {
+    public static let whole = MediaRect(x: 0, y: 0, width: 1, height: 1)
+    /// The crop as fractions of the screen alone, for exports without the frame.
+    public static func screen(_ crop: MediaRect, in frame: DeviceFrame) -> MediaRect {
+        func clamp(_ value: Double) -> Double { min(1, max(0, value)) }
+        let x0 = clamp((crop.x * frame.width - frame.screenX) / frame.screenWidth)
+        let y0 = clamp((crop.y * frame.height - frame.screenY) / frame.screenHeight)
+        let x1 = clamp(((crop.x + crop.width) * frame.width - frame.screenX) / frame.screenWidth)
+        let y1 = clamp(((crop.y + crop.height) * frame.height - frame.screenY) / frame.screenHeight)
+        guard x1 - x0 > 0.001, y1 - y0 > 0.001 else { return whole }
+        return MediaRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0)
+    }
+}
+
+extension PhoneViewport {
+    /// The part of the framed device in view, as fractions of it, or nil when all of it shows.
+    public var visible: MediaRect? {
+        guard overflowsX || overflowsY else { return nil }
+        let width = frame.width * scale, height = frame.height * scale
+        let x0 = max(0, -originX) / width, y0 = max(0, -originY) / height
+        let x1 = min(width, Double(canvasWidth) - originX) / width, y1 = min(height, Double(canvasHeight) - originY) / height
+        guard x1 > x0, y1 > y0 else { return nil }
+        return MediaRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0)
+    }
+    /// How far one wheel tick of `cells` rows (or columns) moves the pan, as a fraction of the overflow.
+    public func panStep(cells: Double = 2) -> (x: Double, y: Double) {
+        let overX = frame.width * scale - Double(canvasWidth), overY = frame.height * scale - Double(canvasHeight)
+        let cellWidth = Double(canvasWidth) / Double(columns), cellHeight = Double(canvasHeight) / Double(rows)
+        return (overX > 0.5 ? min(1, cells * 2 * cellWidth / overX) : 0, overY > 0.5 ? min(1, cells * cellHeight / overY) : 0)
     }
 }

@@ -89,4 +89,41 @@ final class AppStoreMediaTests: XCTestCase {
         XCTAssertEqual(AppPreviewRules.warnings(seconds: 20), [])
         XCTAssertEqual(AppPreviewRules.warnings(seconds: 8).count, 1)
     }
+
+    func testViewportReportsWhatIsVisibleWhenZoomedIn() {
+        let frame = DeviceFrame(screenWidth: 402, screenHeight: 874)
+        let fitted = PhoneViewport(frame: frame, column: 1, row: 1, columns: 80, rows: 40, cellWidth: 10, cellHeight: 20)
+        XCTAssertNil(fitted.visible)
+        let top = PhoneViewport(frame: frame, column: 1, row: 1, columns: 80, rows: 40, cellWidth: 10, cellHeight: 20, zoom: 2, pan: (0.5, 0))
+        let crop = try! XCTUnwrap(top.visible)
+        XCTAssertEqual(crop.y, 0, accuracy: 0.0001)
+        XCTAssertEqual(crop.height, 0.5, accuracy: 0.02)
+        let bottom = PhoneViewport(frame: frame, column: 1, row: 1, columns: 80, rows: 40, cellWidth: 10, cellHeight: 20, zoom: 2, pan: (0.5, 1))
+        XCTAssertEqual(bottom.visible!.y + bottom.visible!.height, 1, accuracy: 0.0001)
+        // A wheel tick moves a fraction of the overflow, never past it.
+        let step = top.panStep()
+        XCTAssertGreaterThan(step.y, 0); XCTAssertLessThanOrEqual(step.y, 1)
+    }
+
+    func testCropOfTheFrameMapsOntoTheScreen() {
+        let frame = DeviceFrame(screenWidth: 402, screenHeight: 874)
+        XCTAssertEqual(MediaCrop.screen(MediaCrop.whole, in: frame), MediaCrop.whole)
+        let topHalf = MediaCrop.screen(MediaRect(x: 0, y: 0, width: 1, height: 0.5), in: frame)
+        XCTAssertEqual(topHalf.x, 0); XCTAssertEqual(topHalf.y, 0); XCTAssertEqual(topHalf.width, 1)
+        XCTAssertLessThan(topHalf.height, 0.55); XCTAssertGreaterThan(topHalf.height, 0.45)
+    }
+
+    func testTransparencyIsOfferedOnlyAtThePhonesOwnSize() {
+        XCTAssertEqual(MediaBackground.parse("transparent", fileExists: { _ in false }), .transparent)
+        XCTAssertFalse(AppStoreSettings.backgrounds(asShown: false).contains("transparent"))
+        XCTAssertTrue(AppStoreSettings.backgrounds(asShown: true).contains("transparent"))
+        var settings = AppStoreSettings(display: "shown", background: "transparent")
+        XCTAssertEqual(settings.style(finish: .black).size, .native)
+        XCTAssertTrue(settings.style(finish: .black).transparent)
+        settings.display = "6.9"; settings.normalize()
+        XCTAssertNil(settings.background)
+        // A transparent frame hugs the phone; no opaque margin is added.
+        let style = MediaStyle(frame: .black, background: .transparent)
+        XCTAssertNil(style.resolvedBackground); XCTAssertFalse(style.inset)
+    }
 }

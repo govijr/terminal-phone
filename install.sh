@@ -1,7 +1,7 @@
 #!/bin/bash
 # Installs the latest terminal-phone release:
 #   curl -fsSL https://raw.githubusercontent.com/govijr/terminal-phone/main/install.sh | bash
-# Pin a version with TERMINAL_PHONE_VERSION=0.3.2. Options after `bash -s --` go to `terminal-phone self install`
+# Pin a version with TERMINAL_PHONE_VERSION=0.4.0. Options after `bash -s --` go to `terminal-phone self install`
 # (for example --prefix PATH or --no-path).
 set -euo pipefail
 

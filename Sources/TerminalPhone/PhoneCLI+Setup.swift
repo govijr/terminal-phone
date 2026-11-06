@@ -33,10 +33,10 @@ extension PhoneCLI {
         guard args.positionals == ["install"] else { throw AgentError(.invalidRequest, "Usage: terminal-phone self install [--prefix PATH] [--no-path]") }
         let prefix = URL(fileURLWithPath: (args.options["prefix"] ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local").path) as String)
         guard args.options["prefix"] == nil || args.options["prefix"]!.hasPrefix("/") else { throw AgentError(.invalidRequest, "The install prefix must be an absolute path.") }
+        let source = Bundle.main.executableURL!.resolvingSymlinksInPath().deletingLastPathComponent()
+        try await verifySignature(source.appendingPathComponent("terminal-phone"))
         if !args.flags.contains("skip-setup") { try await PhoneSetup(cli: self).ensureSimulator(allowDownload: true, managed: true) }
         try migrateRealDeviceRuntime()
-        let source = Bundle.main.executableURL!.resolvingSymlinksInPath().deletingLastPathComponent()
-        _ = try await CommandRunner.checked("/usr/bin/codesign", ["--verify", "--strict", source.appendingPathComponent("terminal-phone").path])
         var profile: URL?
         if !args.flags.contains("no-path") {
             let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
@@ -55,6 +55,19 @@ extension PhoneCLI {
         progress("Installed terminal-phone \(PhoneAgentAPI.productVersion).")
         progress(installed.profileUpdated ? "Open a new terminal and run: terminal-phone" : "Run: \(installed.launcher)")
         try printJSON(try JSONSerialization.jsonObject(with: JSONEncoder().encode(installed)))
+    }
+
+    /// Checks the binary's signature from a copy in an empty folder. In place, codesign can mistake the
+    /// package folder for an app bundle: it is named like the executable and its `resources` folder
+    /// matches `Resources` on a case-insensitive disk, so a valid plain-binary signature fails to verify.
+    private func verifySignature(_ binary: URL) async throws {
+        let fm = FileManager.default
+        let folder = fm.temporaryDirectory.appendingPathComponent("terminal-phone-verify-\(UUID().uuidString)")
+        try fm.createDirectory(at: folder, withIntermediateDirectories: false)
+        defer { try? fm.removeItem(at: folder) }
+        let copy = folder.appendingPathComponent("terminal-phone")
+        try fm.copyItem(at: binary, to: copy)
+        _ = try await CommandRunner.checked("/usr/bin/codesign", ["--verify", "--strict", copy.path])
     }
 
     func connectCommand(_ input: [String]) async throws {

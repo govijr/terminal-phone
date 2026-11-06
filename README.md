@@ -20,13 +20,19 @@ terminal-phone puts an iOS simulator, or your own paired iPhone, inline in your 
 
 Requirements: an Apple silicon Mac with macOS 15 or later, and Xcode 26 or later installed from Apple and opened once.
 
-**Prebuilt download:** from [Releases](https://github.com/govijr/terminal-phone/releases), with `curl` so macOS doesn't quarantine it:
+```sh
+curl -fsSL https://raw.githubusercontent.com/govijr/terminal-phone/main/install.sh | bash
+```
+
+Then open a new terminal and run `terminal-phone`. The [install script](install.sh) downloads the latest release, checks its SHA-256 checksum and runs `terminal-phone self install`, which installs to `~/.local` and adds it to your PATH. Pin a version with `TERMINAL_PHONE_VERSION=0.3.2`, or pass install options with `bash -s -- --prefix /absolute/path --no-path`.
+
+**Manual download:** from [Releases](https://github.com/govijr/terminal-phone/releases), with `curl` so macOS doesn't quarantine it:
 
 ```sh
-base=https://github.com/govijr/terminal-phone/releases/download/v0.3.1
-curl -fsSLO "$base/terminal-phone-0.3.1-macos-arm64.tar.gz" -O "$base/terminal-phone-0.3.1-macos-arm64.tar.gz.sha256"
-shasum -a 256 -c terminal-phone-0.3.1-macos-arm64.tar.gz.sha256
-tar -xzf terminal-phone-0.3.1-macos-arm64.tar.gz
+base=https://github.com/govijr/terminal-phone/releases/download/v0.3.2
+curl -fsSLO "$base/terminal-phone-0.3.2-macos-arm64.tar.gz" -O "$base/terminal-phone-0.3.2-macos-arm64.tar.gz.sha256"
+shasum -a 256 -c terminal-phone-0.3.2-macos-arm64.tar.gz.sha256
+tar -xzf terminal-phone-0.3.2-macos-arm64.tar.gz
 ./terminal-phone/terminal-phone self install
 ```
 

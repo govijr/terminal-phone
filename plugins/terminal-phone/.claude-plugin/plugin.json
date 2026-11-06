@@ -1,6 +1,6 @@
 {
   "name": "terminal-phone",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Drive an iOS simulator or paired iPhone from Claude Code: MCP phone tools plus a skill for observe, act and verify.",
   "author": { "name": "govijr" },
   "homepage": "https://github.com/govijr/terminal-phone",

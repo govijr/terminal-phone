@@ -12,11 +12,13 @@ terminal-phone
 
 The CLI finds Xcode, installs a missing iOS simulator runtime, prepares phone controls, boots your phone and opens the interactive viewer. Later runs reuse your phone and configuration. The viewer runs in any terminal. Ghostty and kitty get kitty graphics over shared memory; iTerm2, WezTerm, Warp and VS Code (with `terminal.integrated.enableImages`) get inline images; Terminal.app, Alacritty and unknown terminals get 24-bit or 256-colour half-block graphics. Inside tmux 3.3+ the viewer turns on `allow-passthrough` for its own pane and uses the outer terminal's graphics, with kitty images drawn as Unicode placeholders so tmux keeps them in place. Force a protocol with `--protocol kitty|iterm|blocks`.
 
-To install a downloaded package once:
+To install the latest release:
 
 ```sh
-./terminal-phone self install
+curl -fsSL https://raw.githubusercontent.com/govijr/terminal-phone/main/install.sh | bash
 ```
+
+The script downloads the release, checks its checksum and runs `terminal-phone self install`. To install a package you downloaded yourself, run `./terminal-phone/terminal-phone self install` from the folder you extracted it into.
 
 Then open a new terminal and run `terminal-phone`. The installer adds the command path, backs up shell configuration before changing it, preserves its file permissions and installs a versioned runtime. It preserves existing phone data and does not package personal iPhone signing files. `--prefix /absolute/path --no-path` supports a custom installation.
 

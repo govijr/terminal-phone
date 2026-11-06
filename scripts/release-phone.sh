@@ -71,3 +71,12 @@ tar -czf "$phone_archive" -C "$phone_staging" terminal-phone
 # Name only, no local path, so downloaders can run: shasum -a 256 -c FILE.sha256
 (cd "$(dirname "$phone_archive")" && shasum -a 256 "$(basename "$phone_archive")" > "$(basename "$phone_archive").sha256")
 echo "Packaged ($mode): $phone_archive"
+# Install the package the way users do (unpacked as terminal-phone/, then self install) into a throwaway
+# prefix and data directory, so a package that can't install fails here instead of on someone's Mac.
+phone_check="$(mktemp -d "$PWD/.build/phone-install-check-XXXXXX")"
+trap 'rm -rf "$phone_staging" "$phone_check"' EXIT
+tar -xzf "$phone_archive" -C "$phone_check"
+TERMINAL_PHONE_HOME="$phone_check/home" TERMINAL_PHONE_DEPENDENCIES="$phone_check/dependencies" \
+  "$phone_check/terminal-phone/terminal-phone" self install --prefix "$phone_check/prefix" --no-path --skip-setup >/dev/null
+[[ "$("$phone_check/prefix/bin/terminal-phone" version)" = "terminal-phone $phone_release_version" ]] || { echo 'The packaged CLI did not install.' >&2; exit 1; }
+echo "Install check passed."

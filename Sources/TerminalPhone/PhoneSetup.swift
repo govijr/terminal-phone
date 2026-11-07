@@ -15,11 +15,36 @@ final class PhoneSetup {
         let configured = try? PhoneConfiguration.load().developerDirectory
         let existing = ProcessInfo.processInfo.environment["DEVELOPER_DIR"]
         let applications = (try? FileManager.default.contentsOfDirectory(atPath: "/Applications")) ?? []
-        let candidates = [existing, configured, "/Applications/Xcode.app/Contents/Developer"].compactMap { $0 } +
-            applications.filter { $0.hasPrefix("Xcode") && $0.hasSuffix(".app") }.sorted().reversed().map { "/Applications/\($0)/Contents/Developer" }
+        let candidates = developerDirectoryCandidates(existing: existing, configured: configured,
+                                                      selected: selectedDeveloperDirectory(), applications: applications)
         if let selected = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0 + "/usr/bin/simctl") }) {
             setenv("DEVELOPER_DIR", selected, 1)
         }
+    }
+
+    /// Developer directories to try, in order: an explicit DEVELOPER_DIR, the one an earlier run saved, the
+    /// user's `xcode-select` choice (what xcrun itself uses), then /Applications/Xcode.app and any other
+    /// Xcode*.app bundles. With several Xcodes installed, /Applications/Xcode.app can be an older release
+    /// whose simctl does not work with the newer CoreSimulator service the selected Xcode installed.
+    nonisolated static func developerDirectoryCandidates(existing: String?, configured: String?, selected: String?, applications: [String]) -> [String] {
+        let ordered = [existing, configured, selected, "/Applications/Xcode.app/Contents/Developer"].compactMap { $0 } +
+            applications.filter { $0.hasPrefix("Xcode") && $0.hasSuffix(".app") }.sorted().reversed().map { "/Applications/\($0)/Contents/Developer" }
+        var seen = Set<String>()
+        return ordered.filter { seen.insert($0).inserted }
+    }
+
+    /// The developer directory chosen with `xcode-select`, or nil when it cannot be read.
+    nonisolated static func selectedDeveloperDirectory() -> String? {
+        let process = Process(), output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcode-select")
+        process.arguments = ["--print-path"]
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return nil }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let path = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return process.terminationStatus == 0 && !path.isEmpty ? path : nil
     }
 
     func ensureSimulator(allowDownload: Bool, managed: Bool = false) async throws {

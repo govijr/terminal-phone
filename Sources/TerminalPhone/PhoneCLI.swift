@@ -46,6 +46,14 @@ final class PhoneCLI {
     func simctl(_ arguments: [String], timeout: TimeInterval = 60) async throws -> Data {
         try await CommandRunner.checked(xcrun, ["simctl"] + arguments, timeout: timeout)
     }
+    /// Captures a simulator screenshot through a private temporary file. Xcode 27's `simctl io screenshot`
+    /// treats "-" as a file name rather than standard output, so the image never reaches the pipe.
+    func simctlScreenshot(_ udid: String, type: String = "png", timeout: TimeInterval = 15) async throws -> Data {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("terminal-phone-screenshot-\(UUID().uuidString).\(type)")
+        defer { try? FileManager.default.removeItem(at: file) }
+        _ = try await simctl(["io", udid, "screenshot", "--type=\(type)", file.path], timeout: timeout)
+        return try Data(contentsOf: file)
+    }
     func catalog() async throws -> SimulatorCatalog {
         try JSONDecoder().decode(SimulatorCatalog.self, from: await simctl(["list", "--json"]))
     }
@@ -271,7 +279,7 @@ final class PhoneCLI {
         if ["snapshot", "screenshot"].contains(verb) {
             guard positions.isEmpty else { throw Failure("Usage: action [NAME] screenshot [--output PATH]") }
             let scale = try screenScale(saved, catalog: found)
-            let native = try await simctl(["io", saved.udid, "screenshot", "--type=png", "-"], timeout: 15)
+            let native = try await simctlScreenshot(saved.udid)
             let output = URL(fileURLWithPath: ((args.options["output"] ?? "terminal-phone-\(name).png") as NSString).expandingTildeInPath).standardizedFileURL
             if args.flags.contains("framed") {
                 let framed = try framedPNG(native, phone: saved, scale: scale)
@@ -331,7 +339,7 @@ final class PhoneCLI {
     }
 
     func capture(_ phone: Phone, scale: Double) async throws -> PhoneFrame {
-        try resized(try await simctl(["io", phone.udid, "screenshot", "--type=png", "-"], timeout: 15), scale: scale)
+        try resized(try await simctlScreenshot(phone.udid), scale: scale)
     }
     /// Resizes a native screenshot to display points, the coordinate space input uses.
     func resized(_ native: Data, scale: Double) throws -> PhoneFrame {

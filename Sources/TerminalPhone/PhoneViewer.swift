@@ -280,7 +280,7 @@ final class PhoneViewer {
         return Task { @MainActor in
             while !Task.isCancelled && !quit {
                 do {
-                    renderer.submit(try await cli.simctl(["io", udid, "screenshot", "--type=jpeg", "-"], timeout: 15))
+                    renderer.submit(try await cli.simctlScreenshot(udid, type: "jpeg"))
                     try await Task.sleep(nanoseconds: 200_000_000)
                 } catch { if !Task.isCancelled { failure = error.localizedDescription; quit = true }; break }
             }

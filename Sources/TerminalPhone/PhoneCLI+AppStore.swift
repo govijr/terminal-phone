@@ -94,7 +94,7 @@ extension PhoneCLI {
         }
         let (phone, catalog) = try await phone(name)
         let scale = try screenScale(phone, catalog: catalog)
-        return (try MediaComposer.decode(try await simctl(["io", phone.udid, "screenshot", "--type=png", "-"], timeout: 15)), scale)
+        return (try MediaComposer.decode(try await simctlScreenshot(phone.udid)), scale)
     }
 
     private func appStoreScreenshot(_ args: Arguments, name: String) async throws {

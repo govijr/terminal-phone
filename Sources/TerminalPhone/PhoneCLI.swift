@@ -311,19 +311,19 @@ final class PhoneCLI {
         throw Failure("Accessibility inspection did not complete")
     }
 
-    private func profile(_ phone: Phone, catalog: SimulatorCatalog) -> NSDictionary? {
+    private func mainScreen(_ phone: Phone, catalog: SimulatorCatalog) -> SimulatorMainScreen? {
         guard let path = catalog.devicetypes.first(where: { $0.identifier == phone.deviceType })?.bundlePath else { return nil }
-        return NSDictionary(contentsOfFile: path + "/Contents/Resources/profile.plist")
+        return SimulatorMainScreen(bundlePath: path)
     }
     func screenScale(_ phone: Phone, catalog: SimulatorCatalog) throws -> Double {
-        guard let number = profile(phone, catalog: catalog)?["mainScreenScale"] as? NSNumber, (1...4).contains(number.doubleValue) else {
+        guard let scale = mainScreen(phone, catalog: catalog)?.scale, (1...4).contains(scale) else {
             throw Failure("Cannot determine this simulator's display scale; refusing to guess input coordinates")
         }
-        return number.doubleValue
+        return scale
     }
     func screen(_ phone: Phone, catalog: SimulatorCatalog) throws -> PhoneScreen {
-        let scale = try screenScale(phone, catalog: catalog), profile = profile(phone, catalog: catalog)
-        guard let width = (profile?["mainScreenWidth"] as? NSNumber)?.intValue, let height = (profile?["mainScreenHeight"] as? NSNumber)?.intValue,
+        let scale = try screenScale(phone, catalog: catalog), main = mainScreen(phone, catalog: catalog)
+        guard let width = main?.width, let height = main?.height,
               (1...16384).contains(width), (1...16384).contains(height) else {
             throw Failure("Cannot determine this simulator's display size; refusing to guess input coordinates")
         }

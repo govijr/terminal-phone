@@ -217,4 +217,32 @@ final class PhoneTests: XCTestCase {
         do { _ = try await CommandRunner.run("/bin/sleep", ["5"], timeout: 0.1); XCTFail("Expected timeout") } catch {}
         XCTAssertLessThan(Date().timeIntervalSince(start), 4)
     }
+
+    func testMainScreenFromXcode26Profile() {
+        let profile: NSDictionary = ["mainScreenScale": 3, "mainScreenWidth": 1206, "mainScreenHeight": 2622]
+        let screen = SimulatorMainScreen(profile: profile, capabilities: nil)
+        XCTAssertEqual(screen.scale, 3)
+        XCTAssertEqual(screen.width, 1206)
+        XCTAssertEqual(screen.height, 2622)
+    }
+    func testMainScreenFromXcode27Capabilities() {
+        // Xcode 27 device types no longer put the main-screen values in profile.plist.
+        let profile: NSDictionary = ["modelIdentifier": "iPhone19,4"]
+        let capabilities: NSDictionary = ["capabilities": ["ScreenDimensionsCapability":
+            ["main-screen-scale": 3, "main-screen-width": 1398, "main-screen-height": 2034]]]
+        let screen = SimulatorMainScreen(profile: profile, capabilities: capabilities)
+        XCTAssertEqual(screen.scale, 3)
+        XCTAssertEqual(screen.width, 1398)
+        XCTAssertEqual(screen.height, 2034)
+    }
+    func testMainScreenPrefersProfileAndReportsMissingValues() {
+        let profile: NSDictionary = ["mainScreenScale": 2]
+        let capabilities: NSDictionary = ["capabilities": ["ScreenDimensionsCapability": ["main-screen-scale": 3, "main-screen-width": 750]]]
+        let screen = SimulatorMainScreen(profile: profile, capabilities: capabilities)
+        XCTAssertEqual(screen.scale, 2)
+        XCTAssertEqual(screen.width, 750)
+        XCTAssertNil(screen.height)
+        XCTAssertEqual(SimulatorMainScreen(profile: nil, capabilities: nil), SimulatorMainScreen(profile: [:], capabilities: [:]))
+        XCTAssertNil(SimulatorMainScreen(profile: nil, capabilities: nil).scale)
+    }
 }

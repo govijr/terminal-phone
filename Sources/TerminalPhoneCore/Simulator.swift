@@ -221,3 +221,29 @@ public enum PhoneInput {
         return result + ["--udid", udid]
     }
 }
+
+/// A simulator device type's main-screen values. Xcode 26 device types keep them in profile.plist
+/// (`mainScreenScale`, `mainScreenWidth`, `mainScreenHeight`); Xcode 27 moved them into capabilities.plist
+/// under `capabilities` → `ScreenDimensionsCapability` (`main-screen-scale`, `main-screen-width`, `main-screen-height`).
+public struct SimulatorMainScreen: Equatable {
+    public let scale: Double?
+    public let width: Int?
+    public let height: Int?
+
+    public init(profile: NSDictionary?, capabilities: NSDictionary?) {
+        let dimensions = (capabilities?["capabilities"] as? NSDictionary)?["ScreenDimensionsCapability"] as? NSDictionary
+        func number(_ legacy: String, _ current: String) -> NSNumber? {
+            (profile?[legacy] as? NSNumber) ?? (dimensions?[current] as? NSNumber)
+        }
+        scale = number("mainScreenScale", "main-screen-scale")?.doubleValue
+        width = number("mainScreenWidth", "main-screen-width")?.intValue
+        height = number("mainScreenHeight", "main-screen-height")?.intValue
+    }
+
+    /// Reads both plists from a device type bundle, as listed by `simctl list --json` (`bundlePath`).
+    public init(bundlePath: String) {
+        let resources = bundlePath + "/Contents/Resources/"
+        self.init(profile: NSDictionary(contentsOfFile: resources + "profile.plist"),
+                  capabilities: NSDictionary(contentsOfFile: resources + "capabilities.plist"))
+    }
+}

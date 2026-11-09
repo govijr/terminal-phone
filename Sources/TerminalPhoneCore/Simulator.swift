@@ -231,13 +231,19 @@ public struct SimulatorMainScreen: Equatable {
     public let height: Int?
 
     public init(profile: NSDictionary?, capabilities: NSDictionary?) {
-        let dimensions = (capabilities?["capabilities"] as? NSDictionary)?["ScreenDimensionsCapability"] as? NSDictionary
-        func number(_ legacy: String, _ current: String) -> NSNumber? {
-            (profile?[legacy] as? NSNumber) ?? (dimensions?[current] as? NSNumber)
+        let capabilities = capabilities?["capabilities"] as? NSDictionary
+        let dimensions = capabilities?["ScreenDimensionsCapability"] as? NSDictionary
+        // Some device bundles list geometry only per display. Use the built-in primary display:
+        // external and CarPlay displays have their own, unrelated coordinates.
+        let primary = (capabilities?["displays"] as? [NSDictionary])?.first {
+            $0["deviceName"] as? String == "primary" && $0["displayType"] as? String == "integrated"
         }
-        scale = number("mainScreenScale", "main-screen-scale")?.doubleValue
-        width = number("mainScreenWidth", "main-screen-width")?.intValue
-        height = number("mainScreenHeight", "main-screen-height")?.intValue
+        func number(_ legacy: String, _ current: String, _ display: String) -> NSNumber? {
+            (profile?[legacy] as? NSNumber) ?? (dimensions?[current] as? NSNumber) ?? (primary?[display] as? NSNumber)
+        }
+        scale = number("mainScreenScale", "main-screen-scale", "scale")?.doubleValue
+        width = number("mainScreenWidth", "main-screen-width", "width")?.intValue
+        height = number("mainScreenHeight", "main-screen-height", "height")?.intValue
     }
 
     /// Reads both plists from a device type bundle, as listed by `simctl list --json` (`bundlePath`).

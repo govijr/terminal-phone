@@ -84,6 +84,12 @@ for protocol, marker in [("kitty", b"\x1b_Ga=T,f=100"), ("iterm", b"\x1b]1337;Fi
                 received.extend(chunk)
                 if b"\x1b[16t" in chunk:
                     os.write(master, b"\x1b[6;21;8t")
+                # The viewer probes image support before selecting Kitty output.
+                # This PTY stands in for the terminal, so answer its direct-image query.
+                if b"\x1b_Gi=32" in chunk:
+                    os.write(master, b"\x1b_Gi=32;OK\x1b\\")
+                if b"\x1b[c" in chunk:
+                    os.write(master, b"\x1b[?1;2;4c")
             # Wait for graphics, not a particular footer phrase: viewer chrome may change.
             if marker in received and not resized:
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 70, 0, 0))

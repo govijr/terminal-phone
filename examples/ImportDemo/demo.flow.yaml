@@ -1,0 +1,10 @@
+# Starts the message import, goes Home and captures the Live Activity in the Dynamic Island.
+- launch: dev.terminal-phone.misento
+- tap: {id: import}
+- expect: "Importing your messages"
+- wait: 2
+- press: home
+- wait: 2
+- screenshot: terminal-phone-results/misento-expanded.png
+- wait: 6
+- screenshot: terminal-phone-results/misento-compact.png

@@ -38,6 +38,17 @@ final class TerminalSplitTests: XCTestCase {
                                                                   "--cwd", "/work", "--shell=none", "--", "/bin/sh", "-c", command])])
         XCTAssertEqual(try plan(env, .up).steps[0].arguments[4], "above")
         XCTAssertEqual(try plan(["TERM_PROGRAM": "rex"], .left).steps[0].arguments.prefix(3), ["split", "--split", "left"])
+        XCTAssertEqual(try plan(["TERM_PROGRAM": "rex", "REX_BLOCK": ""]).steps[0].arguments.prefix(2), ["split", "--split"])
+    }
+
+    func testRexIsFoundInItsBinDirWhenPATHLacksIt() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rex-bin-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let rex = dir.appendingPathComponent("rex").path
+        FileManager.default.createFile(atPath: rex, contents: Data("#!/bin/sh\n".utf8), attributes: [.posixPermissions: 0o755])
+        XCTAssertEqual(TerminalSplit.find("rex", environment: ["PATH": "/nonexistent", "REX_BIN_DIR": dir.path]), rex)
+        XCTAssertNil(TerminalSplit.find("rex", environment: ["PATH": "/nonexistent"]))
     }
 
     func testITermAndGhosttyUseAppleEvents() throws {

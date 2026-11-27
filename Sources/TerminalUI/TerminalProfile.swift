@@ -63,8 +63,8 @@ public struct TerminalProfile: Equatable, Sendable {
         let outerTerm = tmux ? (tmuxClientTerm ?? "") : term
         let outerProgram = tmux && (program == "tmux" || program.isEmpty) ? "" : program
         let app: TerminalApp
-        // REX_BLOCK survives into tmux, like iTerm2's variables.
-        if outerProgram == "rex" || (outerProgram.isEmpty && env["REX_BLOCK"] != nil) { app = .rex }
+        // kitty and Alacritty keep an inherited TERM_PROGRAM, so Rex also needs a TERM that isn't theirs.
+        if outerProgram == "rex" && !outerTerm.contains("kitty") && !outerTerm.contains("alacritty") { app = .rex }
         else if env["KITTY_WINDOW_ID"] != nil || outerTerm.contains("kitty") { app = .kitty }
         else if outerProgram == "ghostty" || outerTerm.contains("ghostty") || env["GHOSTTY_RESOURCES_DIR"] != nil { app = .ghostty }
         else if outerProgram == "iTerm.app" || env["LC_TERMINAL"] == "iTerm2" || (outerProgram.isEmpty && env["ITERM_SESSION_ID"] != nil) { app = .iterm }
@@ -73,6 +73,8 @@ public struct TerminalProfile: Equatable, Sendable {
         else if outerProgram == "vscode" || env["VSCODE_INJECTION"] != nil { app = .vscode }
         else if outerProgram == "Apple_Terminal" { app = .apple }
         else if env["ALACRITTY_WINDOW_ID"] != nil || outerTerm.contains("alacritty") { app = .alacritty }
+        // tmux keeps REX_BLOCK from wherever its server started, so it only decides when nothing else does.
+        else if outerProgram.isEmpty && env["REX_BLOCK"] != nil { app = .rex }
         else { app = .unknown }
 
         let colorterm = (env["COLORTERM"] ?? "").lowercased()

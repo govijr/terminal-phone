@@ -62,4 +62,16 @@ public enum PhoneRuntimeRegistry {
         for path in additions where path.hasPrefix("/") && !known.contains(path) { known.append(path) }
         try JSONEncoder().encode(Array(known.suffix(64))).write(to: root.appendingPathComponent("installed-runtimes.json"), options: .atomic)
     }
+    /// Whether `peer`, a path from proc_pidpath, is this executable or a recorded runtime. proc_pidpath
+    /// returns real paths (/private/tmp/...), while URL.resolvingSymlinksInPath() drops /private, so
+    /// every side is compared through realpath.
+    public static func isVerified(peer: String, current: String, known: [String]) -> Bool {
+        guard let peer = realPath(peer) else { return false }
+        return ([current] + known).contains { realPath($0) == peer }
+    }
+    private static func realPath(_ path: String) -> String? {
+        guard !path.isEmpty, let resolved = realpath(path, nil) else { return nil }
+        defer { free(resolved) }
+        return String(cString: resolved)
+    }
 }

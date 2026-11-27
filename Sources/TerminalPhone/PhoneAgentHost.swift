@@ -118,7 +118,7 @@ enum PhoneAgentClient {
         let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
         let expected = Bundle.main.executableURL!.resolvingSymlinksInPath().path
         let actual = String(cString: buffer)
-        guard length > 0, actual == expected || PhoneRuntimeRegistry.paths().contains(actual) else { throw AgentError(.notReady, "The socket peer is not a verified terminal-phone installation.") }
+        guard length > 0, PhoneRuntimeRegistry.isVerified(peer: actual, current: expected, known: PhoneRuntimeRegistry.paths()) else { throw AgentError(.notReady, "The socket peer is not a verified terminal-phone installation.") }
         guard kill(pid, SIGTERM) == 0 else { throw AgentError(.notReady, "Cannot stop the phone session.") }
         for _ in 0..<40 {
             if (try? PhoneAgentSocket.connect(endpoint.path)) == nil { return true }

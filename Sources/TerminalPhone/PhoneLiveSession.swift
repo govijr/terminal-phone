@@ -44,7 +44,10 @@ final class PhoneLiveSession {
                 return result
             }
             do {
-                while let header = try read(4) {
+                // This loop never returns to GCD, so nothing drains its autorelease pool: without a
+                // pool per packet, every chunk FileHandle.read hands back stays alive (~4 GB per 10 min at 30 fps).
+                while try autoreleasepool(invoking: { () throws -> Bool in
+                    guard let header = try read(4) else { return false }
                     let length = header.reduce(0) { $0 << 8 | Int($1) }
                     guard (1...16 * 1024 * 1024).contains(length), let packet = try read(length) else { throw Failure("Invalid live viewer packet") }
                     if packet[0] == 1 {
@@ -52,7 +55,8 @@ final class PhoneLiveSession {
                     } else if packet[0] == 2, let event = try JSONSerialization.jsonObject(with: packet.dropFirst()) as? [String: Any] {
                         Task { @MainActor [weak self] in if self?.stopped == false { self?.onEvent?(event) } }
                     }
-                }
+                    return true
+                }) {}
                 Task { @MainActor [weak self] in if self?.stopped == false { self?.onFailure?("Live connection ended. See \(logURL.path)") } }
             } catch {
                 let message = error.localizedDescription

@@ -66,6 +66,11 @@ enum TerminalSplit {
             let flag = ["right": "--right", "left": "--left", "down": "--bottom", "up": "--top"][direction.rawValue]!
             let pane = env["WEZTERM_PANE"].map { ["--pane-id", $0] } ?? []
             return Plan(terminal: .wezterm, steps: [Invocation(executable: wezterm, arguments: ["cli", "split-pane"] + pane + [flag, "--percent", "45", "--cwd", directory, "--"] + shell)], note: nil)
+        case .rex:
+            guard let rex = find("rex") else { throw Unsupported(message: "rex is not on PATH. \(manual)") }
+            let place = ["right": "right", "left": "left", "down": "below", "up": "above"][direction.rawValue]!
+            let block = env["REX_BLOCK"].map { ["-b", $0] } ?? []
+            return Plan(terminal: .rex, steps: [Invocation(executable: rex, arguments: ["split"] + block + ["--split", place, "--ratio", "45", "--cwd", directory, "--shell=none", "--"] + shell)], note: nil)
         case .iterm:
             guard direction == .right || direction == .down else { throw Unsupported(message: "iTerm2 opens splits to the right or below. Use --split right or --split down.") }
             guard let session = env["ITERM_SESSION_ID"]?.split(separator: ":").last.map(String.init) else { throw Unsupported(message: "This iTerm2 pane has no session ID. \(manual)") }

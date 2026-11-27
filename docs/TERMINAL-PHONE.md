@@ -10,7 +10,7 @@ After installing, run one command from any folder:
 terminal-phone
 ```
 
-The CLI finds Xcode, installs a missing iOS simulator runtime, prepares phone controls, boots your phone and opens the interactive viewer. Later runs reuse your phone and configuration. The viewer runs in any terminal. Ghostty and kitty get kitty graphics over shared memory; iTerm2, WezTerm, Warp and VS Code (with `terminal.integrated.enableImages`) get inline images; Terminal.app, Alacritty and unknown terminals get 24-bit or 256-colour half-block graphics. Inside tmux 3.3+ the viewer turns on `allow-passthrough` for its own pane and uses the outer terminal's graphics, with kitty images drawn as Unicode placeholders so tmux keeps them in place. Force a protocol with `--protocol kitty|iterm|blocks`.
+The CLI finds Xcode, installs a missing iOS simulator runtime, prepares phone controls, boots your phone and opens the interactive viewer. Later runs reuse your phone and configuration. The viewer runs in any terminal. Ghostty, kitty and Rex get kitty graphics over shared memory; iTerm2, WezTerm, Warp and VS Code (with `terminal.integrated.enableImages`) get inline images; Terminal.app, Alacritty and unknown terminals get 24-bit or 256-colour half-block graphics. Inside tmux 3.3+ the viewer turns on `allow-passthrough` for its own pane and uses the outer terminal's graphics, with kitty images drawn as Unicode placeholders so tmux keeps them in place. Force a protocol with `--protocol kitty|iterm|blocks`.
 
 To install the latest release:
 
@@ -33,6 +33,7 @@ Xcode 26 or newer must be installed from Apple and its first-launch/license prom
 - kitty: `kitty @ launch` next to the current window, right or down. Needs `allow_remote_control yes` (or `socket-only` with `listen_on`) in `kitty.conf`.
 - iTerm2: a native split of the current session, right or down. macOS asks once for permission to control iTerm2.
 - WezTerm: `wezterm cli split-pane`, any direction.
+- Rex: `rex split` beside `$REX_BLOCK`, any direction.
 - Terminal.app and Alacritty have no scriptable splits, so the viewer opens in a new window.
 - Warp, VS Code and other terminals can't be split from outside; the error includes the exact command to run in a split you open yourself.
 

@@ -31,6 +31,26 @@ final class TerminalSplitTests: XCTestCase {
                        [.init(executable: "/bin/wezterm", arguments: ["cli", "split-pane", "--pane-id", "4", "--top", "--percent", "45", "--cwd", "/work", "--", "/bin/sh", "-c", command])])
     }
 
+    func testRexSplitsBesideItsOwnBlock() throws {
+        let env = ["TERM_PROGRAM": "rex", "REX_BLOCK": "block:01a21ab9"]
+        XCTAssertEqual(try plan(env, .down).steps,
+                       [.init(executable: "/bin/rex", arguments: ["split", "-b", "block:01a21ab9", "--split", "below", "--ratio", "45",
+                                                                  "--cwd", "/work", "--shell=none", "--", "/bin/sh", "-c", command])])
+        XCTAssertEqual(try plan(env, .up).steps[0].arguments[4], "above")
+        XCTAssertEqual(try plan(["TERM_PROGRAM": "rex"], .left).steps[0].arguments.prefix(3), ["split", "--split", "left"])
+        XCTAssertEqual(try plan(["TERM_PROGRAM": "rex", "REX_BLOCK": ""]).steps[0].arguments.prefix(2), ["split", "--split"])
+    }
+
+    func testRexIsFoundInItsBinDirWhenPATHLacksIt() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rex-bin-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let rex = dir.appendingPathComponent("rex").path
+        FileManager.default.createFile(atPath: rex, contents: Data("#!/bin/sh\n".utf8), attributes: [.posixPermissions: 0o755])
+        XCTAssertEqual(TerminalSplit.find("rex", environment: ["PATH": "/nonexistent", "REX_BIN_DIR": dir.path]), rex)
+        XCTAssertNil(TerminalSplit.find("rex", environment: ["PATH": "/nonexistent"]))
+    }
+
     func testITermAndGhosttyUseAppleEvents() throws {
         let iterm = try plan(["TERM_PROGRAM": "iTerm.app", "ITERM_SESSION_ID": "w0t1p0:9F3C-11"], .down).steps[0]
         XCTAssertEqual(iterm.executable, "/usr/bin/osascript")

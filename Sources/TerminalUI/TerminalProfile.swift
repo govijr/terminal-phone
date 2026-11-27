@@ -2,7 +2,7 @@ import Foundation
 
 /// The terminal emulator the viewer is drawing into, as far as the environment tells us.
 public enum TerminalApp: String, CaseIterable, Sendable {
-    case ghostty, kitty, iterm, wezterm, warp, vscode, apple, alacritty, unknown
+    case ghostty, kitty, iterm, wezterm, rex, warp, vscode, apple, alacritty, unknown
 
     public var displayName: String {
         switch self {
@@ -10,6 +10,7 @@ public enum TerminalApp: String, CaseIterable, Sendable {
         case .kitty: "kitty"
         case .iterm: "iTerm2"
         case .wezterm: "WezTerm"
+        case .rex: "Rex"
         case .warp: "Warp"
         case .vscode: "VS Code"
         case .apple: "Terminal"
@@ -21,7 +22,7 @@ public enum TerminalApp: String, CaseIterable, Sendable {
 
 /// How the phone's pixels reach the screen.
 public enum GraphicsMode: String, CaseIterable, Sendable {
-    /// Kitty graphics protocol: Ghostty, kitty, and anything that answers its query.
+    /// Kitty graphics protocol: Ghostty, kitty, Rex, and anything that answers its query.
     case kitty
     /// iTerm2 inline images: iTerm2, WezTerm, Warp, and VS Code/Cursor with images enabled.
     case iterm
@@ -62,7 +63,9 @@ public struct TerminalProfile: Equatable, Sendable {
         let outerTerm = tmux ? (tmuxClientTerm ?? "") : term
         let outerProgram = tmux && (program == "tmux" || program.isEmpty) ? "" : program
         let app: TerminalApp
-        if env["KITTY_WINDOW_ID"] != nil || outerTerm.contains("kitty") { app = .kitty }
+        // kitty and Alacritty keep an inherited TERM_PROGRAM, so Rex also needs a TERM that isn't theirs.
+        if outerProgram == "rex" && !outerTerm.contains("kitty") && !outerTerm.contains("alacritty") { app = .rex }
+        else if env["KITTY_WINDOW_ID"] != nil || outerTerm.contains("kitty") { app = .kitty }
         else if outerProgram == "ghostty" || outerTerm.contains("ghostty") || env["GHOSTTY_RESOURCES_DIR"] != nil { app = .ghostty }
         else if outerProgram == "iTerm.app" || env["LC_TERMINAL"] == "iTerm2" || (outerProgram.isEmpty && env["ITERM_SESSION_ID"] != nil) { app = .iterm }
         else if outerProgram == "WezTerm" || env["WEZTERM_PANE"] != nil || outerTerm.contains("wezterm") { app = .wezterm }
@@ -70,13 +73,15 @@ public struct TerminalProfile: Equatable, Sendable {
         else if outerProgram == "vscode" || env["VSCODE_INJECTION"] != nil { app = .vscode }
         else if outerProgram == "Apple_Terminal" { app = .apple }
         else if env["ALACRITTY_WINDOW_ID"] != nil || outerTerm.contains("alacritty") { app = .alacritty }
+        // tmux keeps REX_BLOCK from wherever its server started, so it only decides when nothing else does.
+        else if outerProgram.isEmpty && env["REX_BLOCK"] != nil { app = .rex }
         else { app = .unknown }
 
         let colorterm = (env["COLORTERM"] ?? "").lowercased()
         let truecolor = colorterm == "truecolor" || colorterm == "24bit" || ![.apple, .unknown].contains(app)
         let graphics: GraphicsMode, probe: Bool
         switch app {
-        case .ghostty, .kitty: graphics = .kitty; probe = true
+        case .ghostty, .kitty, .rex: graphics = .kitty; probe = true
         case .iterm, .wezterm, .warp: graphics = .iterm; probe = false
         // xterm.js shows images only when the user enabled them; its DA1 reply says so.
         case .vscode: graphics = .iterm; probe = true

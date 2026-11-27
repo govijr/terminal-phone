@@ -66,6 +66,11 @@ enum TerminalSplit {
             let flag = ["right": "--right", "left": "--left", "down": "--bottom", "up": "--top"][direction.rawValue]!
             let pane = env["WEZTERM_PANE"].map { ["--pane-id", $0] } ?? []
             return Plan(terminal: .wezterm, steps: [Invocation(executable: wezterm, arguments: ["cli", "split-pane"] + pane + [flag, "--percent", "45", "--cwd", directory, "--"] + shell)], note: nil)
+        case .rex:
+            guard let rex = find("rex") else { throw Unsupported(message: "rex is not on PATH. \(manual)") }
+            let place = ["right": "right", "left": "left", "down": "below", "up": "above"][direction.rawValue]!
+            let block = env["REX_BLOCK"].flatMap { $0.isEmpty ? nil : ["-b", $0] } ?? []
+            return Plan(terminal: .rex, steps: [Invocation(executable: rex, arguments: ["split"] + block + ["--split", place, "--ratio", "45", "--cwd", directory, "--shell=none", "--"] + shell)], note: nil)
         case .iterm:
             guard direction == .right || direction == .down else { throw Unsupported(message: "iTerm2 opens splits to the right or below. Use --split right or --split down.") }
             guard let session = env["ITERM_SESSION_ID"]?.split(separator: ":").last.map(String.init) else { throw Unsupported(message: "This iTerm2 pane has no session ID. \(manual)") }
@@ -103,7 +108,7 @@ enum TerminalSplit {
         let executable = Bundle.main.executableURL!.resolvingSymlinksInPath().path
         let command = paneCommand(executable: executable, arguments: arguments ?? ["view", name] + extraArguments, environment: env)
         let plan = try plan(profile: profile, environment: env, direction: direction, command: command,
-                            directory: FileManager.default.currentDirectoryPath, tty: await callerTTY(), find: find)
+                            directory: FileManager.default.currentDirectoryPath, tty: await callerTTY(), find: { find($0, environment: env) })
         for step in plan.steps {
             let result = try await CommandRunner.run(step.executable, step.arguments, timeout: 20)
             guard result.status == 0 || step.optional else {
@@ -142,10 +147,11 @@ enum TerminalSplit {
         return nil
     }
 
-    static func find(_ name: String) -> String? {
-        let env = ProcessInfo.processInfo.environment
-        let bundled = ["kitty": "/Applications/kitty.app/Contents/MacOS/kitty", "wezterm": "/Applications/WezTerm.app/Contents/MacOS/wezterm",
+    static func find(_ name: String, environment env: [String: String] = ProcessInfo.processInfo.environment) -> String? {
+        var bundled = ["kitty": "/Applications/kitty.app/Contents/MacOS/kitty", "wezterm": "/Applications/WezTerm.app/Contents/MacOS/wezterm",
                        "alacritty": "/Applications/Alacritty.app/Contents/MacOS/alacritty"]
+        // Rex prepends REX_BIN_DIR to PATH, but an agent's shell may have reset PATH since.
+        if let rexBin = env["REX_BIN_DIR"], !rexBin.isEmpty { bundled["rex"] = rexBin + "/rex" }
         let search = (env["PATH"] ?? "") + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
         for directory in search.split(separator: ":") {
             let path = "\(directory)/\(name)"

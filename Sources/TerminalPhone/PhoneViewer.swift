@@ -150,7 +150,7 @@ final class PhoneViewer {
         case .blocks: mode = shm || direct ? .kitty : .blocks
         }
         if mode == .blocks, requestedGraphics == nil, profile.app != .vscode {
-            record("Text graphics in \(profile.displayName). Ghostty, kitty, iTerm2 or WezTerm show the phone sharper", ok: true)
+            record("Text graphics in \(profile.displayName). Ghostty, kitty, Rex, iTerm2 or WezTerm show the phone sharper", ok: true)
         }
         let transport: GraphicsTransport
         switch mode {

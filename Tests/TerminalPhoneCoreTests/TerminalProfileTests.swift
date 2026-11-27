@@ -12,6 +12,7 @@ final class TerminalProfileTests: XCTestCase {
             (["TERM_PROGRAM": "vscode"], .vscode, .iterm),
             (["TERM_PROGRAM": "Apple_Terminal", "TERM": "xterm-256color"], .apple, .blocks),
             (["TERM": "alacritty", "ALACRITTY_WINDOW_ID": "1"], .alacritty, .blocks),
+            (["TERM_PROGRAM": "rex", "TERM": "xterm-256color", "REX_BLOCK": "block:01a2"], .rex, .kitty),
             (["TERM": "xterm-256color"], .unknown, .blocks),
         ]
         for (env, app, graphics) in cases {
@@ -23,6 +24,29 @@ final class TerminalProfileTests: XCTestCase {
         // VS Code only shows images when the user enabled them, so it is probed.
         XCTAssertTrue(TerminalProfile.detect(["TERM_PROGRAM": "vscode"]).needsGraphicsProbe)
         XCTAssertFalse(TerminalProfile.detect(["TERM_PROGRAM": "vscode"]).richGlyphs)
+    }
+
+    func testRexIsProbedForSharedMemoryAndKeepsItsNameInsideTmux() {
+        let rex = TerminalProfile.detect(["TERM_PROGRAM": "rex", "TERM": "xterm-256color"])
+        XCTAssertEqual(rex.displayName, "Rex")
+        XCTAssertTrue(rex.needsGraphicsProbe)
+        XCTAssertTrue(rex.richGlyphs)
+        let tmux = TerminalProfile.detect(["TMUX": "/tmp/tmux-501/default,1,0", "TERM_PROGRAM": "tmux", "REX_BLOCK": "block:01a2"],
+                                          tmuxClientTerm: "xterm-256color")
+        XCTAssertEqual(tmux.app, .rex); XCTAssertEqual(tmux.graphics, .kitty)
+    }
+
+    func testRexVariablesInheritedByAnotherTerminalDoNotWin() {
+        // kitty and Alacritty leave TERM_PROGRAM alone, so a window opened from a Rex shell keeps Rex's.
+        let leaked = ["TERM_PROGRAM": "rex", "REX_BLOCK": "block:01a2"]
+        XCTAssertEqual(TerminalProfile.detect(leaked.merging(["TERM": "xterm-kitty", "KITTY_WINDOW_ID": "3"]) { $1 }).app, .kitty)
+        XCTAssertEqual(TerminalProfile.detect(leaked.merging(["TERM": "alacritty", "ALACRITTY_WINDOW_ID": "1"]) { $1 }).app, .alacritty)
+        // Rex started from a kitty shell still names itself in TERM_PROGRAM and TERM.
+        XCTAssertEqual(TerminalProfile.detect(leaked.merging(["TERM": "xterm-256color", "KITTY_WINDOW_ID": "3"]) { $1 }).app, .rex)
+        // tmux keeps REX_BLOCK from where its server started; the attached client's terminal wins.
+        let tmux = ["TMUX": "/tmp/tmux-501/default,1,0", "TERM_PROGRAM": "tmux", "REX_BLOCK": "block:01a2"]
+        XCTAssertEqual(TerminalProfile.detect(tmux, tmuxClientTerm: "xterm-ghostty").app, .ghostty)
+        XCTAssertEqual(TerminalProfile.detect(tmux, tmuxClientTerm: "xterm-kitty").app, .kitty)
     }
 
     func testColourDepthFollowsCOLORTERMWhereTheTerminalIsUnknownOrApple() {

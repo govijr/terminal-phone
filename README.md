@@ -7,7 +7,7 @@
 
 **An interactive iPhone in your terminal, shared with your AI agents.**
 
-terminal-phone puts an iOS simulator, or your own paired iPhone, inline in your terminal: sharp images in Ghostty, kitty, iTerm2, WezTerm, Warp and VS Code, text graphics everywhere else, and a native split beside your shell. You click, type, drag and scroll on it like a real phone. Your coding agent drives the same phone through a JSON CLI or an MCP server, with element references, postcondition checks and safe recovery, so it can build your app, install it, tap through it and verify the result.
+terminal-phone puts an iOS simulator, or your own paired iPhone, inline in your terminal: sharp images in Ghostty, kitty, Rex, iTerm2, WezTerm, Warp and VS Code, text graphics everywhere else, and a native split beside your shell. You click, type, drag and scroll on it like a real phone. Your coding agent drives the same phone through a JSON CLI or an MCP server, with element references, postcondition checks and safe recovery, so it can build your app, install it, tap through it and verify the result.
 
 <!-- Add a demo GIF here: docs/assets/demo.gif -->
 
@@ -71,6 +71,7 @@ terminal-phone view work --split down
 |---|---|---|
 | Ghostty | Sharp (kitty graphics, shared memory) | Native split, Ghostty 1.3+ |
 | kitty | Sharp (kitty graphics, shared memory) | Native split, right or down; needs `allow_remote_control yes` |
+| Rex | Sharp (kitty graphics, shared memory) | Native split, any direction (`rex split`) |
 | iTerm2 | Sharp (inline images) | Native split, right or down |
 | WezTerm | Sharp (inline images) | Native split, any direction |
 | Warp | Sharp (inline images) | Not scriptable; run the printed command in a split |

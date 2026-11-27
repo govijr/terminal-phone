@@ -160,7 +160,7 @@ final class PhoneCLI {
         case "logs": try await logsCommand(tail)
         case "device": try await device(tail)
         case "view":
-            let args = try Arguments(tail, flags: ["read-only"], options: ["protocol", "cell-size", "split", "frame"])
+            let args = try Arguments(tail, flags: ["read-only", "focus"], options: ["protocol", "cell-size", "split", "frame"])
             let name = try named(args.positionals), saved = try store.load(name)
             try applyFrame(args, to: name)
             if let split = args.options["split"] {
@@ -171,13 +171,13 @@ final class PhoneCLI {
             }
             if !saved.isDevice && !args.flags.contains("read-only") { try await PhoneSetup(cli: self).ensureSimulator(allowDownload: true) }
             if isatty(STDIN_FILENO) == 1 { try rememberPhone(name) }
-            try await PhoneViewer(cli: self, phone: saved, screen: viewScreen(saved), graphics: args.options["protocol"], readOnly: args.flags.contains("read-only"), cellSize: args.options["cell-size"]).run()
+            try await PhoneViewer(cli: self, phone: saved, screen: viewScreen(saved), graphics: args.options["protocol"], readOnly: args.flags.contains("read-only"), cellSize: args.options["cell-size"], focus: args.flags.contains("focus")).run()
         default: throw Failure("Unknown command: \(command). Run terminal-phone help.")
         }
     }
 
     func up(_ input: [String]) async throws {
-        let args = try Arguments(input, flags: ["no-view", "read-only", "allow-input"], options: ["device", "runtime", "protocol", "cell-size", "device-id", "split", "frame"])
+        let args = try Arguments(input, flags: ["no-view", "read-only", "allow-input", "focus"], options: ["device", "runtime", "protocol", "cell-size", "device-id", "split", "frame"])
         let name = try named(args.positionals)
         let split = try args.options["split"].map { value -> SplitDirection in
             guard let direction = SplitDirection(rawValue: value) else { throw Failure("--split must be right, left, down or up") }
@@ -232,7 +232,7 @@ final class PhoneCLI {
             try printJSON(reply)
         } else if !args.flags.contains("no-view"), PhoneViewer.supportsCurrentTerminal {
             try rememberPhone(name)
-            try await PhoneViewer(cli: self, phone: saved, screen: viewScreen(saved), graphics: args.options["protocol"], readOnly: args.flags.contains("read-only"), cellSize: args.options["cell-size"]).run()
+            try await PhoneViewer(cli: self, phone: saved, screen: viewScreen(saved), graphics: args.options["protocol"], readOnly: args.flags.contains("read-only"), cellSize: args.options["cell-size"], focus: args.flags.contains("focus")).run()
         } else {
             try printJSON(["ok": true, "name": name, "udid": saved.udid, "kind": saved.isDevice ? "device" : "simulator", "state": saved.isDevice ? "Connected" : "Booted",
                            "touchAutomationAvailable": saved.isDevice ? saved.acceptsInput : touchAvailable,
@@ -254,6 +254,7 @@ final class PhoneCLI {
     func viewerArguments(_ args: Arguments) -> [String] {
         var forwarded: [String] = []
         if args.flags.contains("read-only") { forwarded.append("--read-only") }
+        if args.flags.contains("focus") { forwarded.append("--focus") }
         for key in ["protocol", "cell-size"] { if let value = args.options[key] { forwarded += ["--\(key)", value] } }
         return forwarded
     }
@@ -365,7 +366,8 @@ final class PhoneCLI {
       terminal-phone up [NAME] [--device 'iPhone 17 Pro'] [--runtime 26.1] [--no-view]
       terminal-phone doctor | devices | runtimes | list
       terminal-phone status|stop [NAME]
-      terminal-phone view [NAME] [--split right|left|down|up] [--read-only] [--protocol kitty|iterm|blocks]
+      terminal-phone view [NAME] [--split right|left|down|up] [--read-only] [--focus] [--protocol kitty|iterm|blocks]
+      terminal-phone view [NAME] --focus   phone only, no header or toolbar (Ctrl+G toggles; or TERMINAL_PHONE_FOCUS=1)
       terminal-phone up [NAME] --split right   boot, then open the phone in a pane beside this one
       terminal-phone view [NAME] --frame orange   frame colour, remembered per phone (Ctrl+F picks):
           graphite, black, silver, white, gold, orange, red, pink, yellow, green, blue, purple

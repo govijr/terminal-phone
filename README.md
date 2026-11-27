@@ -54,7 +54,7 @@ terminal-phone
 
 The first run finds Xcode, downloads a missing iOS simulator runtime, sets up a private, checksum-verified control runtime (no Homebrew Python or system changes), boots a dedicated simulator and opens it in your terminal.
 
-Click to tap, type normally, drag to swipe, and use the wheel to scroll. Ctrl+P switches phones, Ctrl+S takes a screenshot, Ctrl+B goes Home, Ctrl+F opens the frame picker, Ctrl+T opens the simulator tools (status bar, dark mode, text size, location, notifications, permissions), Ctrl+O shows the app's logs in a panel beside the phone, and Ctrl+] exits while the phone keeps running.
+Click to tap, type normally, drag to swipe, and use the wheel to scroll. Ctrl+P switches phones, Ctrl+S takes a screenshot, Ctrl+B goes Home, Ctrl+F opens the frame picker, Ctrl+T opens the simulator tools (status bar, dark mode, text size, location, notifications, permissions), Ctrl+O shows the app's logs in a panel beside the phone, Ctrl+G toggles focus mode (just the phone, no header or toolbar; start in it with `--focus`), and Ctrl+] exits while the phone keeps running.
 
 In the frame picker (Ctrl+F or the **Frame** button), the arrow keys or a click try each colour live on the phone, Return keeps it and Esc goes back. You can also set it from the command line with `--frame`, for example `terminal-phone view --frame orange`. The choice is remembered for each phone. The finishes are graphite (the default), black, silver, white, gold, orange, red, pink, yellow, green, blue and purple.
 

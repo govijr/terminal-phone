@@ -15,8 +15,13 @@ final class PhoneViewer {
         let columns: Int, rows: Int
         /// Roomy panes get a two-line header, a divider and a pill toolbar; small ones one line each.
         let roomy: Bool
+        /// Focus mode: no header or toolbar; the phone gets every row. Ctrl+G toggles.
+        var focus = false
         /// The logs panel, beside the phone in wide panes and below it in narrow ones.
         var logPanel: CellRect? = nil
+        /// First and last rows the phone may use.
+        var top: Int { PhoneViewer.phoneRows(rows: rows, roomy: roomy, focus: focus).top }
+        var bottom: Int { PhoneViewer.phoneRows(rows: rows, roomy: roomy, focus: focus).bottom }
     }
     private struct Activity { let at: Date; let text: String; let ok: Bool; let milliseconds: Double? }
     private struct MenuItem { let name: String; let detail: String; let state: String }
@@ -44,6 +49,7 @@ final class PhoneViewer {
     private var phoneLocked = false
     private var layout: Layout?, size = winsize()
     private var zoom = 1.0, pan = (x: 0.5, y: 0.5)
+    private var focus: Bool
     private var metrics = PhoneMetricFilter()
     private var queue: [[String: Any]] = []
     private var nextID = 0, inFlight: (id: Int, label: String)?
@@ -76,11 +82,12 @@ final class PhoneViewer {
     private var recordingPlan: RecordingPlan?
     private var mediaTask: Task<Void, Never>?, lastMedia: URL?
 
-    init(cli: PhoneCLI, phone: Phone, screen: PhoneScreen, graphics: String?, readOnly: Bool, cellSize: String? = nil) throws {
+    init(cli: PhoneCLI, phone: Phone, screen: PhoneScreen, graphics: String?, readOnly: Bool, cellSize: String? = nil, focus: Bool = false) throws {
         self.cli = cli; self.phone = phone; self.screen = screen; self.viewOnly = readOnly
         finish = Self.savedFrame(for: phone.name, store: cli.store)
         studioSettings = (try? PhoneConfiguration.load(store: cli.store))?.appStore ?? AppStoreSettings()
         let e = ProcessInfo.processInfo.environment
+        self.focus = focus || ["1", "true", "yes"].contains(e["TERMINAL_PHONE_FOCUS"]?.lowercased() ?? "")
         if let graphics, GraphicsMode(rawValue: graphics) == nil { throw Failure("--protocol must be kitty, iterm or blocks") }
         requestedGraphics = graphics.flatMap(GraphicsMode.init(rawValue:))
         guard isatty(0) == 1, isatty(1) == 1 else {
@@ -328,8 +335,8 @@ final class PhoneViewer {
         let cw = cellOverride?.0 ?? metrics.cellWidth ?? (size.ws_xpixel > 0 ? Double(size.ws_xpixel) / Double(cols) : metrics.windowWidth.map { $0 / Double(cols) }) ?? 8
         let ch = cellOverride?.1 ?? metrics.cellHeight ?? (size.ws_ypixel > 0 ? Double(size.ws_ypixel) / Double(rows) : metrics.windowHeight.map { $0 / Double(rows) }) ?? 16
         // Roomy: two header lines and a divider on top, a three-line toolbar below.
-        let roomy = rows >= 20 && cols >= 30
-        let top = roomy ? 4 : 2, bottom = roomy ? rows - 3 : rows - 1
+        let roomy = Self.isRoomy(rows: rows, columns: cols)
+        let (top, bottom) = Self.phoneRows(rows: rows, roomy: roomy, focus: focus)
         var phoneColumns = cols, phoneRows = max(1, bottom - top + 1), logPanel: CellRect?
         if logTail != nil {
             if cols >= 100 {
@@ -343,11 +350,11 @@ final class PhoneViewer {
         let viewport = PhoneViewport(frame: DeviceFrame(screenWidth: screen.width, screenHeight: screen.height, finish: finish),
                                      column: 1, row: top, columns: phoneColumns, rows: phoneRows,
                                      cellWidth: cw * metrics.cellScale, cellHeight: ch * metrics.cellScale, zoom: zoom, pan: pan)
-        let next = Layout(viewport: viewport, columns: cols, rows: rows, roomy: roomy, logPanel: logPanel)
+        let next = Layout(viewport: viewport, columns: cols, rows: rows, roomy: roomy, focus: focus, logPanel: logPanel)
         let palette = Palette.matching(background: metrics.background)
         if palette != Theme.palette { Theme.palette = palette; previousChrome = "" }
         guard clear || next != layout else { return }
-        let resized = next.columns != layout?.columns || next.rows != layout?.rows || next.roomy != layout?.roomy
+        let resized = next.columns != layout?.columns || next.rows != layout?.rows || next.roomy != layout?.roomy || next.focus != layout?.focus
         layout = next
         if clear || resized { writer.write("\u{1b}[0m\u{1b}[2J"); previousChrome = ""; menuArea = nil }
         else if imagesAreText { eraseScreenText() }
@@ -367,9 +374,21 @@ final class PhoneViewer {
     /// Erases the rows the phone can occupy. Needed where images are cell content (iTerm2).
     private func eraseScreenText() {
         guard let layout else { return }
-        let top = layout.roomy ? 4 : 2, bottom = layout.roomy ? layout.rows - 3 : layout.rows - 1
+        let top = layout.top, bottom = layout.bottom
         writer.write((top...max(top, bottom)).map { "\u{1b}[\($0);1H\u{1b}[0m\u{1b}[2K" }.joined())
         previousChrome = ""
+    }
+    /// Roomy panes get a two-line header, a divider and a pill toolbar.
+    nonisolated static func isRoomy(rows: Int, columns: Int) -> Bool { rows >= 20 && columns >= 30 }
+    /// First and last rows the phone may use. Focus mode gives it every row.
+    nonisolated static func phoneRows(rows: Int, roomy: Bool, focus: Bool) -> (top: Int, bottom: Int) {
+        focus ? (1, rows) : roomy ? (4, rows - 3) : (2, rows - 1)
+    }
+    /// Hides or shows the header and toolbar, giving their rows to the phone.
+    private func toggleFocus() {
+        focus.toggle()
+        relayout(clear: true)
+        record(focus ? "Focus mode · ⌃G shows the menus" : "Menus shown · ⌃G for focus mode", ok: true)
     }
     private func setZoom(_ value: Double, resetPan: Bool = false) {
         zoom = min(4, max(0.3, value))
@@ -439,8 +458,8 @@ final class PhoneViewer {
         if title.width + state.width + zoomWidth + 2 <= cols { right += [([Span("   ")], nil)] + zoomControl }
         else if title.width + state.width + 3 <= cols { right += [([Span(" ")], nil)] }
         else { right = [] }
-        row(1, left: [(title, .menu)], right: right)
-        if layout.roomy {
+        if !layout.focus { row(1, left: [(title, .menu)], right: right) }
+        if layout.roomy && !layout.focus {
             let subtitle = [Span("  \(phone.displayModel)", Theme.muted), Span(" · \(phone.displaySystem)\(phone.isDevice ? " · real iPhone" : "")", Theme.faint),
                             Span(readOnly ? " · View only" : " · Interactive", readOnly ? Theme.yellow : Theme.green)]
             row(2, left: [(subtitle, .menu)], right: [(statusLine(now: now, room: cols - subtitle.width - 4), nil)])
@@ -501,7 +520,9 @@ final class PhoneViewer {
         var items = toolbar(labels: true)
         if items.reduce(0, { $0 + $1.0.width }) + 6 > cols { items = toolbar(labels: false) }
         let barWidth = items.reduce(0) { $0 + $1.0.width } + 4
-        if layout.roomy, barWidth <= cols {
+        if layout.focus {
+            // No toolbar; shortcuts and overlays still work.
+        } else if layout.roomy, barWidth <= cols {
             let left = (cols - barWidth) / 2 + 1, top = layout.rows - 2
             output += "\u{1b}[\(top);1H\u{1b}[2K\u{1b}[\(top + 2);1H\u{1b}[2K\u{1b}[\(top + 1);1H\u{1b}[2K"
             output += Box.frame(column: left, row: top, width: barWidth, height: 3)
@@ -951,6 +972,7 @@ final class PhoneViewer {
                 case "ctrl+t": perform(.tools)
                 case "ctrl+o": perform(.logs)
                 case "ctrl+a": perform(.appStore)
+                case "ctrl+g": toggleFocus()
                 default:
                     if let code = ["return": 40, "escape": 41, "backspace": 42, "tab": 43, "delete": 76, "right": 79, "left": 80, "down": 81, "up": 82][key] { enqueue("key", [String(code)], label: "key \(key)") }
                 }
